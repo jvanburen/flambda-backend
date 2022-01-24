@@ -55,6 +55,18 @@
 (copy_files# ocaml/file_formats/cmxs_format.mli)
 
 (copy_files# printer/*.ml{,i})
+(copy_files# llvm/*.ml{,i})
+
+
+(rule
+ (deps ocaml/libtool)
+ (targets libllvm_native.a dllllvm.so)
+ (action
+  (no-infer
+   (progn
+     ;; TODO: these aren't the C bindings, find those...
+    (run ocaml/libtool --mode=link cc -static -o libllvm_native.a   /usr/local/lib/libLLVMCore.a /usr/local/lib/libLLVMAnalysis.a /usr/local/lib/libLLVMDebugInfoDWARF.a)
+    (copy /usr/local/lib/libLLVM.so dllllvm.so)))))
 
 (library
  (name ocamloptcomp)
@@ -213,6 +225,7 @@
   x86_masm
   x86_proc
   fdo_info
+  emit_llvm
   ;; asmcomp/cfg
   cfg
   cfg_intf
@@ -248,9 +261,14 @@
   ;; printer/
   printast_with_mappings
   location_tracker_formatter
+  ;; llvm/
   ; The driver should be in here too, but is not at present.  This might
   ; be tricky because it has a different name...
+  llvm
+  llvm_debuginfo
+  llvm_analysis
   )
+   (foreign_archives llvm)
  (libraries
   ocamlcommon
   stdlib
