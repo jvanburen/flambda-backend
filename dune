@@ -55,27 +55,29 @@
 (copy_files# ocaml/file_formats/cmxs_format.mli)
 
 (copy_files# printer/*.ml{,i})
-(copy_files# llvm/*.ml{,i})
+; (copy_files# llvm/*.ml{,i})
 
 
-(rule
- (deps ocaml/libtool)
- (targets libllvm_native.a dllllvm.so)
- (action
-  (no-infer
-   (progn
-     ;; TODO: these aren't the C bindings, find those...
-    (run ocaml/libtool --mode=link cc -static -o libllvm_native.a   /usr/local/lib/libLLVMCore.a /usr/local/lib/libLLVMAnalysis.a /usr/local/lib/libLLVMDebugInfoDWARF.a)
-    (copy /usr/local/lib/libLLVM.so dllllvm.so)))))
+; (rule
+;  (deps ocaml/libtool)
+;  (targets libllvm_native.a dllllvm.so)
+;  (action
+;   (no-infer
+;    (progn
+;      ;; TODO: these aren't the C bindings, find those...
+;     (run ocaml/libtool --mode=link cc -static -o libllvm_native.a   /usr/local/lib/libLLVMCore.a /usr/local/lib/libLLVMAnalysis.a /usr/local/lib/libLLVMDebugInfoDWARF.a)
+;     (copy /usr/local/lib/libLLVM.so dllllvm.so)))))
 
 (library
  (name ocamloptcomp)
  (wrapped false) ; for compatibility with existing code
  (modes byte native)
+
+  (c_library_flags (:standard -L/usr/local/lib))
  ; We should change the code so this "-open" can be removed.
  ; Likewise fix occurrences of warning 9.
  (flags
-  (:standard -principal -nostdlib -w -9))
+  (:standard -principal -nostdlib -w -9 -cclib -L/usr/local/lib))
  (ocamlopt_flags
   (:include %{project_root}/ocamlopt_flags.sexp))
  (modules_without_implementation
@@ -264,17 +266,16 @@
   ;; llvm/
   ; The driver should be in here too, but is not at present.  This might
   ; be tricky because it has a different name...
-  llvm
-  llvm_debuginfo
-  llvm_analysis
+  ; llvm
+  ; llvm_debuginfo
+  ; llvm_analysis
   )
-   (foreign_archives llvm)
+   ; (foreign_archives llvm)
  (libraries
   ocamlcommon
-  stdlib
   flambda_backend_common
   flambda2_identifiers
-  flambda2_cmx))
+  flambda2_cmx llvm llvm.analysis llvm.debuginfo ))
 
 (library
  (name flambda_backend_common)
@@ -304,6 +305,7 @@
 
 (executable
  (name flambda_backend_main)
+
  (modes byte)
  (flags
   (:standard
@@ -314,7 +316,19 @@
    -cclib
    "-L ocaml/runtime"
    -cclib
-   -lcamlrun))
+   -lcamlrun
+
+   -ccopt
+   "-L/usr/local/lib"
+   -ccopt -lLLVM-13
+
+   -dllib /usr/local/lib/libLLVM-13.so
+   ; -lLLVMDemangle
+   ; -cclib -lLLVMCore
+   ; -cclib -lLLVMObject
+   ; -cclib -lLLVMSupport
+   ; -cclib -lLLVM-13
+ ))
  (link_deps
   (file ocaml/stdlib/camlheader)
   (file ocaml/runtime/libcamlrun.a))
@@ -326,7 +340,9 @@
   flambda2_to_cmm
   ocamloptcomp
   ocamlcommon
-  stdlib)
+  stdlib
+  llvm 
+  llvm.analysis llvm.debuginfo  )
  (modules flambda_backend_main))
 
 (rule
