@@ -60,3 +60,4 @@ _install/
 /oc_cflags.sexp
 /oc_cppflags.sexp
 /sharedlib_cflags.sexp
+_opam
