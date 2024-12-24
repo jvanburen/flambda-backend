@@ -14,11 +14,10 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 open! Flambda.Import
 
-type resolver = Compilation_unit.t -> Flambda2_types.Typing_env.t option
+type resolver =
+  Compilation_unit.t -> Flambda2_types.Typing_env.Serializable.t option
 
 type get_imported_names = unit -> Name.Set.t
 
@@ -36,20 +35,21 @@ val create :
   resolver:resolver ->
   get_imported_names:get_imported_names ->
   get_imported_code:get_imported_code ->
-  float_const_prop:bool ->
+  propagating_float_consts:bool ->
   unit_toplevel_exn_continuation:Continuation.t ->
   unit_toplevel_return_continuation:Continuation.t ->
+  toplevel_my_region:Variable.t ->
+  toplevel_my_ghost_region:Variable.t ->
   t
 
 val all_code : t -> Code.t Code_id.Map.t
 
-val resolver : t -> Compilation_unit.t -> Flambda2_types.Typing_env.t option
+val resolver :
+  t -> Compilation_unit.t -> Flambda2_types.Typing_env.Serializable.t option
 
-val float_const_prop : t -> bool
+val propagating_float_consts : t -> bool
 
 val at_unit_toplevel : t -> bool
-
-val set_not_at_unit_toplevel : t -> t
 
 val set_at_unit_toplevel_state : t -> bool -> t
 
@@ -67,7 +67,7 @@ val enter_set_of_closures : t -> t
 
 val increment_continuation_scope : t -> t
 
-val increment_continuation_scope_twice : t -> t
+val bump_current_level_scope : t -> t
 
 val get_continuation_scope : t -> Scope.t
 
@@ -87,8 +87,6 @@ val add_symbol : t -> Symbol.t -> Flambda2_types.t -> t
 
 val define_symbol : t -> Symbol.t -> Flambda_kind.t -> t
 
-val define_symbol_if_undefined : t -> Symbol.t -> Flambda_kind.t -> t
-
 val mem_symbol : t -> Symbol.t -> bool
 
 val find_symbol : t -> Symbol.t -> Flambda2_types.t
@@ -101,31 +99,23 @@ val define_name_if_undefined : t -> Bound_name.t -> Flambda_kind.t -> t
 
 val add_equation_on_name : t -> Name.t -> Flambda2_types.t -> t
 
-val define_parameters : t -> params:Bound_parameter.t list -> t
+val define_parameters : t -> params:Bound_parameters.t -> t
 
 val add_parameters :
   ?name_mode:Name_mode.t ->
-  ?at_unit_toplevel:bool ->
   t ->
-  Bound_parameter.t list ->
+  Bound_parameters.t ->
   param_types:Flambda2_types.t list ->
   t
 
 val add_parameters_with_unknown_types :
+  ?alloc_modes:Alloc_mode.For_types.t list ->
   ?name_mode:Name_mode.t ->
-  ?at_unit_toplevel:bool ->
   t ->
-  Bound_parameter.t list ->
+  Bound_parameters.t ->
   t
 
-val add_parameters_with_unknown_types' :
-  ?name_mode:Name_mode.t ->
-  ?at_unit_toplevel:bool ->
-  t ->
-  Bound_parameter.t list ->
-  t * Flambda2_types.t list
-
-val mark_parameters_as_toplevel : t -> Bound_parameter.t list -> t
+val mark_parameters_as_toplevel : t -> Bound_parameters.t -> t
 
 val define_variable_and_extend_typing_environment :
   t ->
@@ -158,11 +148,11 @@ val mem_code : t -> Code_id.t -> bool
 (** This function raises if the code ID is unbound. *)
 val find_code_exn : t -> Code_id.t -> Code_or_metadata.t
 
-val set_inlined_debuginfo : t -> Debuginfo.t -> t
+val set_inlined_debuginfo : t -> from:t -> t
+
+val merge_inlined_debuginfo : t -> from_apply_expr:Inlined_debuginfo.t -> t
 
 val add_inlined_debuginfo : t -> Debuginfo.t -> Debuginfo.t
-
-val get_inlined_debuginfo : t -> Debuginfo.t
 
 val round : t -> int
 
@@ -177,24 +167,27 @@ val add_cse :
 
 val find_cse : t -> Flambda_primitive.Eligible_for_cse.t -> Simple.t option
 
+val find_comparison_result : t -> Variable.t -> Comparison_result.t option
+
 val cse : t -> Common_subexpression_elimination.t
+
+val comparison_results : t -> Comparison_result.t Variable.Map.t
 
 val with_cse : t -> Common_subexpression_elimination.t -> t
 
 val set_do_not_rebuild_terms_and_disable_inlining : t -> t
 
+val disable_inlining : t -> t
+
 val set_rebuild_terms : t -> t
 
-type are_rebuilding_terms
-
-val are_rebuilding_terms : t -> are_rebuilding_terms
-
-val are_rebuilding_terms_to_bool : are_rebuilding_terms -> bool
+val are_rebuilding_terms : t -> Are_rebuilding_terms.t
 
 val enter_closure :
   Code_id.t ->
   return_continuation:Continuation.t ->
   exn_continuation:Continuation.t ->
+  my_closure:Variable.t ->
   t ->
   t
 
@@ -204,6 +197,31 @@ val inlining_arguments : t -> Inlining_arguments.t
 
 val set_inlining_arguments : Inlining_arguments.t -> t -> t
 
-val enter_inlined_apply : called_code:Code.t -> apply:Apply.t -> t -> t
+val enter_inlined_apply :
+  called_code:Code.t -> apply:Apply.t -> was_inline_always:bool -> t -> t
 
 val generate_phantom_lets : t -> bool
+
+val inlining_history_tracker : t -> Inlining_history.Tracker.t
+
+val set_inlining_history_tracker : Inlining_history.Tracker.t -> t -> t
+
+val relative_history : t -> Inlining_history.Relative.t
+
+val loopify_state : t -> Loopify_state.t
+
+val set_loopify_state : Loopify_state.t -> t -> t
+
+val with_code_age_relation : Code_age_relation.t -> t -> t
+
+val defined_variables_by_scope : t -> Lifted_cont_params.t list
+
+val enter_continuation_handler : Lifted_cont_params.t -> t -> t
+
+val variables_defined_in_current_continuation : t -> Lifted_cont_params.t
+
+val cost_of_lifting_continuations_out_of_current_one : t -> int
+
+val add_lifting_cost : int -> t -> t
+
+val denv_for_lifted_continuation : denv_for_join:t -> denv:t -> t

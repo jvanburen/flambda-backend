@@ -16,25 +16,38 @@
 (* Construction of the interference graph.
    Annotate pseudoregs with interference lists and preference lists. *)
 
+let check_collisions = false
+
+let assert_no_collisions set =
+  if check_collisions && (Reg.set_has_collisions set) then
+  Misc.fatal_error "live set has physical register collisions"
+
+let assert_compatible src dst =
+  if not (Reg.types_are_compatible src dst) then
+  Misc.fatal_errorf "found move between registers of incompatible types (%a to %a)"
+  Printreg.reg src Printreg.reg dst
+
 module IntPairSet =
-  Set.Make(struct
+  Hashtbl.Make(struct
     type t = int * int
-    let compare ((a1,b1) : t) (a2,b2) =
-      match compare a1 a2 with
-        | 0 -> compare b1 b2
-        | c -> c
+
+    let equal ((a1, b1) : int * int) (a2, b2) =
+      a1 = a2 && b1 = b2
+
+    let hash = Hashtbl.hash
   end)
+
+let mat = IntPairSet.create 42
 
 open Reg
 open Mach
 
 let build_graph fundecl =
-
   (* The interference graph is represented in two ways:
      - by adjacency lists for each register
      - by a sparse bit matrix (a set of pairs of register stamps) *)
 
-  let mat = ref IntPairSet.empty in
+  IntPairSet.clear mat;
 
   (* Record an interference between two registers *)
   let add_interf ri rj =
@@ -42,8 +55,8 @@ let build_graph fundecl =
       let i = ri.stamp and j = rj.stamp in
       if i <> j then begin
         let p = if i < j then (i, j) else (j, i) in
-        if not(IntPairSet.mem p !mat) then begin
-          mat := IntPairSet.add p !mat;
+        if not (IntPairSet.mem mat p) then begin
+          IntPairSet.replace mat p ();
           if ri.loc = Unknown then begin
             ri.interf <- rj :: ri.interf;
             if not rj.spill then ri.degree <- ri.degree + 1
@@ -77,11 +90,13 @@ let build_graph fundecl =
      do not add an interference between them if the source is still live
      afterwards. *)
   let add_interf_move src dst s =
+    assert_compatible src dst;
     Reg.Set.iter (fun r -> if r.stamp <> src.stamp then add_interf dst r) s in
 
   (* Compute interferences *)
 
   let rec interf i =
+    assert_no_collisions i.live;
     let destroyed = Proc.destroyed_at_oper i.desc in
     if Array.length destroyed > 0 then add_interf_set destroyed i.live;
     match i.desc with
@@ -107,7 +122,7 @@ let build_graph fundecl =
         interf i.next
     | Icatch(_rec_flag, _ts, handlers, body) ->
         interf body;
-        List.iter (fun (_, _, handler) -> interf handler) handlers;
+        List.iter (fun (_, _, handler, _) -> interf handler) handlers;
         interf i.next
     | Iexit _ ->
         ()
@@ -124,12 +139,13 @@ let build_graph fundecl =
       float arguments in integer registers, PR#6227.) *)
 
   let add_pref weight r1 r2 =
+    assert_compatible r1 r2;
     let i = r1.stamp and j = r2.stamp in
     if i <> j
     && r1.loc = Unknown
     && Proc.register_class r1 = Proc.register_class r2
     && (let p = if i < j then (i, j) else (j, i) in
-        not (IntPairSet.mem p !mat))
+        not (IntPairSet.mem mat p))
     then r1.prefer <- (r2, weight) :: r1.prefer
   in
 
@@ -184,7 +200,7 @@ let build_graph fundecl =
               if weight < 1000 then 8 * weight else weight
           | Cmm.Nonrecursive ->
               weight in
-        List.iter (fun (_nfail, _ts, handler) -> prefer weight_h handler) handlers;
+        List.iter (fun (_nfail, _ts, handler, _) -> prefer weight_h handler) handlers;
         prefer weight i.next
     | Iexit _ ->
         ()

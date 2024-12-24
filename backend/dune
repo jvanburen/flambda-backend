@@ -13,11 +13,17 @@
 ;**************************************************************************
 
 (rule
- (targets arch.ml CSE.ml proc.ml reload.ml scheduling.ml selection.ml)
+ (targets arch.ml arch.mli cfg_selection.ml CSE.ml proc.ml regalloc_stack_operands.ml reload.ml
+          selection.ml selection_utils.ml simd.ml simd_selection.ml simd_reload.ml simd_proc.ml
+          stack_check.ml
+          vectorize_specific.ml
+          )
  (mode    fallback)
  (deps    (glob_files amd64/*.ml)
-          (glob_files arm64/*.ml))
- (action  (bash "cp %{env:ARCH=amd64}/*.ml .")))
+          (glob_files amd64/*.mli)
+          (glob_files arm64/*.ml)
+          (glob_files arm64/*.mli))
+ (action  (bash "cp %{env:ARCH=amd64}/*.ml %{env:ARCH=amd64}/*.mli .")))
 
 (rule
  (targets emit.ml)
@@ -31,4 +37,4 @@
      (with-stdout-to %{targets}
        (progn
          (bash "echo \\# 1 \\\"`cat contains-input-name`\\\"")
-         (bash "%{dep:../ocaml/tools/cvt_emit.exe} < `cat contains-input-name`"))))))
+         (bash "%{dep:../tools/cvt_emit.exe} < `cat contains-input-name`"))))))

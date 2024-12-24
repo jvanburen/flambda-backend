@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 type t
 
 val print_name_modes :
@@ -49,7 +47,13 @@ val clean_for_export : t -> reachable_names:Name_occurrences.t -> t
 
 val apply_renaming : t -> Renaming.t -> t
 
+include Contains_ids.S with type t := t
+
 val merge : t -> t -> t
 
-val remove_unused_closure_vars :
-  t -> used_closure_vars:Var_within_closure.Set.t -> t
+val remove_unused_value_slots_and_shortcut_aliases :
+  t -> used_value_slots:Value_slot.Set.t -> t
+
+val canonicalise : t -> Simple.t -> Simple.t
+
+val free_function_slots_and_value_slots : t -> Name_occurrences.t

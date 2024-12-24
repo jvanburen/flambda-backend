@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 (* CR mshinwell: We need to emit [Warnings.Inlining_impossible] as required.
 
    When in fallback-inlining mode: if we want to follow Closure we should not
@@ -41,8 +39,9 @@ type t =
         threshold : float
       }
   | Attribute_always
-  | Attribute_unroll of int
-  | Definition_says_inline
+  | Begin_unrolling of int
+  | Continue_unrolling
+  | Definition_says_inline of { was_inline_always : bool }
   | Speculatively_inline of
       { cost_metrics : Cost_metrics.t;
         evaluated_to : float;
@@ -67,15 +66,21 @@ let [@ocamlformat "disable"] print ppf t =
   | Never_inlined_attribute ->
     Format.fprintf ppf "Never_inlined_attribute"
   | Attribute_always ->
-    Format.fprintf ppf "Attribute_unroll"
-  | Definition_says_inline ->
-    Format.fprintf ppf "Definition_says_inline"
-  | Attribute_unroll unroll_to ->
+    Format.fprintf ppf "Attribute_always"
+  | Definition_says_inline { was_inline_always } ->
     Format.fprintf ppf
-      "@[<hov 1>(Attribute_unroll@ \
+      "@[<hov 1>(Definition_says_inline@ \
+        @[<hov 1>(was_inline_always@ %b)@])\
+        @]"
+      was_inline_always
+  | Begin_unrolling unroll_to ->
+    Format.fprintf ppf
+      "@[<hov 1>(Begin_unrolling@ \
         @[<hov 1>(unroll_to@ %d)@]\
         )@]"
       unroll_to
+  | Continue_unrolling ->
+    Format.fprintf ppf "Continue_unrolling"
   | Speculatively_not_inline { cost_metrics; threshold; evaluated_to; } ->
     Format.fprintf ppf
       "@[<hov 1>(Speculatively_not_inline@ \
@@ -98,11 +103,11 @@ let [@ocamlformat "disable"] print ppf t =
       threshold
 
 type can_inline =
-  | Do_not_inline of
-      { warn_if_attribute_ignored : bool;
-        because_of_definition : bool
+  | Do_not_inline of { erase_attribute_if_ignored : bool }
+  | Inline of
+      { unroll_to : int option;
+        was_inline_always : bool
       }
-  | Inline of { unroll_to : int option }
 
 let can_inline (t : t) : can_inline =
   match t with
@@ -110,20 +115,30 @@ let can_inline (t : t) : can_inline =
   | Recursion_depth_exceeded | Speculatively_not_inline _
   | Definition_says_not_to_inline | Argument_types_not_useful ->
     (* If there's an [@inlined] attribute on this, something's gone wrong *)
-    Do_not_inline
-      { warn_if_attribute_ignored = true; because_of_definition = true }
+    Do_not_inline { erase_attribute_if_ignored = false }
   | Never_inlined_attribute ->
     (* If there's an [@inlined] attribute on this, something's gone wrong *)
-    Do_not_inline
-      { warn_if_attribute_ignored = true; because_of_definition = true }
+    Do_not_inline { erase_attribute_if_ignored = false }
   | Unrolling_depth_exceeded ->
     (* If there's an [@unrolled] attribute on this, then we'll ignore the
        attribute when we stop unrolling, which is fine *)
-    Do_not_inline
-      { warn_if_attribute_ignored = false; because_of_definition = true }
-  | Attribute_unroll unroll_to -> Inline { unroll_to = Some unroll_to }
-  | Definition_says_inline | Speculatively_inline _ | Attribute_always ->
-    Inline { unroll_to = None }
+    Do_not_inline { erase_attribute_if_ignored = true }
+  | Begin_unrolling unroll_to ->
+    Inline { unroll_to = Some unroll_to; was_inline_always = false }
+  | Continue_unrolling ->
+    let was_inline_always =
+      (* This could be [true] since the user asked to unroll this far, but the
+         warning would be confusing. We should use something more informative
+         than a [bool] here to describe what warning should be raised if we
+         don't inline. *)
+      false
+    in
+    Inline { unroll_to = None; was_inline_always }
+  | Definition_says_inline { was_inline_always } ->
+    Inline { unroll_to = None; was_inline_always }
+  | Speculatively_inline _ ->
+    Inline { unroll_to = None; was_inline_always = false }
+  | Attribute_always -> Inline { unroll_to = None; was_inline_always = true }
 
 let report_reason fmt t =
   match (t : t) with
@@ -149,9 +164,11 @@ let report_reason fmt t =
     Format.fprintf fmt "the@ call@ has@ an@ attribute@ forbidding@ inlining"
   | Attribute_always ->
     Format.fprintf fmt "the@ call@ has@ an@ [@@inline always]@ attribute"
-  | Attribute_unroll n ->
+  | Begin_unrolling n ->
     Format.fprintf fmt "the@ call@ has@ an@ [@@unroll %d]@ attribute" n
-  | Definition_says_inline ->
+  | Continue_unrolling ->
+    Format.fprintf fmt "this@ function@ is@ being@ unrolled"
+  | Definition_says_inline { was_inline_always = _ } ->
     Format.fprintf fmt
       "this@ function@ was@ decided@ to@ be@ always@ inlined@ at@ its@ \
        definition@ site (annotated@ by@ [@inlined always]@ or@ determined@ to@ \

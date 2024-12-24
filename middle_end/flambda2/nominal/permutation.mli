@@ -16,8 +16,6 @@
 
 (** Generic module for handling permutations. *)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 module Make (N : Container_types.S) : sig
   type t
 
@@ -34,4 +32,6 @@ module Make (N : Container_types.S) : sig
   val compose_one_fresh : t -> N.t -> fresh:N.t -> t
 
   val compose : second:t -> first:t -> t
+
+  val inverse : t -> t
 end

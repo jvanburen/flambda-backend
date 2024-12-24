@@ -260,7 +260,7 @@ module Stdlib = struct
 
   let neg_infinity = float_of_bits 0xFF_F0_00_00_00_00_00_00L
 
-  let nan = float_of_bits 0x7F_F0_00_00_00_00_00_01L
+  let nan = float_of_bits 0x7F_F8_00_00_00_00_00_01L
 
   let max_float = float_of_bits 0x7F_EF_FF_FF_FF_FF_FF_FFL
 
@@ -447,11 +447,9 @@ module Stdlib = struct
     let rec iter = function
       | [] -> ()
       | a :: l ->
-        begin
-          try flush a
-          with Sys_error _ ->
-            () (* ignore channels closed during a preceding flush. *)
-        end;
+        (try flush a
+         with Sys_error _ ->
+           () (* ignore channels closed during a preceding flush. *));
         iter l
     in
     iter (out_channels_list ())
@@ -568,7 +566,7 @@ module Stdlib = struct
         | [] -> raise End_of_file
         | _ -> build_result (bytes_create len) len accu
       else if n > 0
-      then begin
+      then (
         (* n > 0: newline found in buffer *)
         let res = bytes_create (n - 1) in
         ignore (unsafe_input chan res 0 (n - 1));
@@ -578,8 +576,7 @@ module Stdlib = struct
         | [] -> res
         | _ ->
           let len = len + n - 1 in
-          build_result (bytes_create len) len (res :: accu)
-      end
+          build_result (bytes_create len) len (res :: accu))
       else
         (* n < 0: newline not found *)
         let beg = bytes_create (-n) in
@@ -712,10 +709,9 @@ module Stdlib = struct
     exit_function
       := fun () ->
            if not !f_already_ran
-           then begin
+           then (
              f_already_ran := true;
-             f ()
-           end;
+             f ());
            g ()
 
   let do_at_exit () = !exit_function ()
@@ -1416,7 +1412,6 @@ let bprint_fmt buf fmt =
       fmtiter rest ign_flag
     | End_of_format -> ()
   in
-
   fmtiter fmt false
 
 (***)
@@ -2198,20 +2193,16 @@ let fix_padding padty width str =
   then str
   else
     let res = Bytes.make width (if padty = Zeros then '0' else ' ') in
-    begin
-      match padty with
-      | Left -> String.blit str 0 res 0 len
-      | Right -> String.blit str 0 res (width - len) len
-      | Zeros when len > 0 && (str.[0] = '+' || str.[0] = '-' || str.[0] = ' ')
-        ->
-        Bytes.set res 0 str.[0];
-        String.blit str 1 res (width - len + 1) (len - 1)
-      | Zeros when len > 1 && str.[0] = '0' && (str.[1] = 'x' || str.[1] = 'X')
-        ->
-        Bytes.set res 1 str.[1];
-        String.blit str 2 res (width - len + 2) (len - 2)
-      | Zeros -> String.blit str 0 res (width - len) len
-    end;
+    (match padty with
+    | Left -> String.blit str 0 res 0 len
+    | Right -> String.blit str 0 res (width - len) len
+    | Zeros when len > 0 && (str.[0] = '+' || str.[0] = '-' || str.[0] = ' ') ->
+      Bytes.set res 0 str.[0];
+      String.blit str 1 res (width - len + 1) (len - 1)
+    | Zeros when len > 1 && str.[0] = '0' && (str.[1] = 'x' || str.[1] = 'X') ->
+      Bytes.set res 1 str.[1];
+      String.blit str 2 res (width - len + 2) (len - 2)
+    | Zeros -> String.blit str 0 res (width - len) len);
     Bytes.unsafe_to_string res
 
 (* Add '0' padding to int, int32, nativeint or int64 string representation. *)

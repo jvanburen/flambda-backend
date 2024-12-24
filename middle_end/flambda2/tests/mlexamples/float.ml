@@ -259,7 +259,7 @@ module Stdlib = struct
 
   let neg_infinity = float_of_bits 0xFF_F0_00_00_00_00_00_00L
 
-  let nan = float_of_bits 0x7F_F0_00_00_00_00_00_01L
+  let nan = float_of_bits 0x7F_F8_00_00_00_00_00_01L
 
   let max_float = float_of_bits 0x7F_EF_FF_FF_FF_FF_FF_FFL
 
@@ -562,7 +562,9 @@ let[@inline] min_max_num (x : float) (y : float) =
   then x, y
   else y, x
 
-external seeded_hash_param : int -> int -> int -> float -> int = "caml_hash"
+(* [caml_hash_exn] doesn't raise on floats, so it's fine for it to be marked
+   [@@noalloc]. *)
+external seeded_hash_param : int -> int -> int -> float -> int = "caml_hash_exn"
   [@@noalloc]
 
 let hash x = seeded_hash_param 10 100 0 x
@@ -784,11 +786,10 @@ module Array = struct
       let i31 = i + i + i + 1 in
       let x = ref i31 in
       if i31 + 2 < l
-      then begin
+      then (
         if cmp (get a i31) (get a (i31 + 1)) < 0 then x := i31 + 1;
         if cmp (get a !x) (get a (i31 + 2)) < 0 then x := i31 + 2;
-        !x
-      end
+        !x)
       else if i31 + 1 < l && cmp (get a i31) (get a (i31 + 1)) < 0
       then i31 + 1
       else if i31 < l
@@ -798,10 +799,9 @@ module Array = struct
     let rec trickledown l i e =
       let j = maxson l i in
       if cmp (get a j) e > 0
-      then begin
+      then (
         set a i (get a j);
-        trickledown l j e
-      end
+        trickledown l j e)
       else set a i e
     in
     let trickle l i e = try trickledown l i e with Bottom i -> set a i e in
@@ -815,10 +815,9 @@ module Array = struct
       let father = (i - 1) / 3 in
       assert (i <> father);
       if cmp (get a father) e < 0
-      then begin
+      then (
         set a i (get a father);
-        if father > 0 then trickleup father e else set a 0 e
-      end
+        if father > 0 then trickleup father e else set a 0 e)
       else set a i e
     in
     let l = length a in
@@ -844,20 +843,18 @@ module Array = struct
       let src1r = src1ofs + src1len and src2r = src2ofs + src2len in
       let rec loop i1 s1 i2 s2 d =
         if cmp s1 s2 <= 0
-        then begin
+        then (
           set dst d s1;
           let i1 = i1 + 1 in
           if i1 < src1r
           then loop i1 (get a i1) i2 s2 (d + 1)
-          else blit src2 i2 dst (d + 1) (src2r - i2)
-        end
-        else begin
+          else blit src2 i2 dst (d + 1) (src2r - i2))
+        else (
           set dst d s2;
           let i2 = i2 + 1 in
           if i2 < src2r
           then loop i1 s1 i2 (get src2 i2) (d + 1)
-          else blit a i1 dst (d + 1) (src1r - i1)
-        end
+          else blit a i1 dst (d + 1) (src1r - i1))
       in
       loop src1ofs (get a src1ofs) src2ofs (get src2 src2ofs) dstofs
     in

@@ -14,43 +14,121 @@
 
 (** Report inlining decisions *)
 
-type at_call_site =
-  | Known_function of
-      { code_id : Code_id.exported;  (** code id of the callee *)
-        decision : Call_site_inlining_decision_type.t
-      }  (** Function call where the function's type is known *)
-  | Unknown_function  (** Function call where the function's type is unknown. *)
+module Pass : sig
+  type t =
+    | After_closure_conversion
+    | Before_simplify
+    | After_simplify
 
-(** There are three decisions made for each function declaration: on after
-    conversion in CPS and closure, one before simplifying the body, and one
-    after (this is useful for e.g. recursive functions). *)
-type fundecl_pass =
-  | After_closure_conversion
-  | Before_simplify of { dbg_including_inlining_stack : Debuginfo.t }
-  | After_simplify
-(**)
+  val print : Format.formatter -> t -> unit
+end
 
-type at_function_declaration =
-  { pass : fundecl_pass;
-    code_id : Code_id.exported;  (** code id of the function being declared *)
-    decision : Function_decl_inlining_decision_type.t
-  }
+module Context : sig
+  (* Represents the context under which an inlining decision was taken. *)
+  type t =
+    { args : Inlining_arguments.t;
+      cost_metrics : Cost_metrics.t option;
+      depth : int option;
+      unrolling_depth : int option option;
+      are_rebuilding_terms : Are_rebuilding_terms.t;
+      pass : Pass.t
+    }
 
-(** This defines the various kinds of decisions related to inlining that will be
-    reported, together with some additional information to better identify to
-    what the decision refers to. *)
+  val print : Format.formatter -> t -> unit
+end
 
-type decision =
-  | At_call_site of at_call_site
-  | At_function_declaration of at_function_declaration
-(**)
+module Decision_with_context : sig
+  type decision =
+    | Call of Call_site_inlining_decision_type.t
+    | Fundecl of Function_decl_inlining_decision_type.t
 
-(** Record a decision. *)
-val record_decision : dbg:Debuginfo.t -> decision -> unit
+  type t =
+    { context : Context.t;
+      decision : decision
+    }
+
+  val print : Format.formatter -> t -> unit
+end
+
+module Uid : sig
+  type t =
+    { compilation_unit : Compilation_unit.t;
+      t : string
+    }
+end
+
+module Inlining_tree : sig
+  module Key : sig
+    type scope =
+      | Module
+      | Class
+      | Unknown
+
+    val compare_scope : scope -> scope -> int
+
+    type element =
+      | Fundecl of string
+      | Scope of scope * string
+      | Call of Inlining_history.Absolute.t
+
+    val compare_element : element -> element -> int
+
+    type t = Debuginfo.t * element
+
+    val compare : t -> t -> int
+  end
+
+  module Map : Map.S with type key = Key.t
+
+  type decision_or_reference =
+    | Decision of Decision_with_context.t
+    | Reference of Inlining_history.Absolute.t
+    | Unavailable
+
+  type item =
+    | Call of
+        { decision : decision_or_reference;
+          tree : t
+        }
+    | Fundecl of
+        { decisions : decisions;
+          body : t
+        }
+    | Scope of t
+
+  and t = item Map.t
+
+  and decisions = Decision_with_context.t list
+end
+
+val record_decision_at_call_site_for_known_function :
+  tracker:Inlining_history.Tracker.t ->
+  unrolling_depth:int option ->
+  apply:Apply_expr.t ->
+  pass:Pass.t ->
+  callee:Inlining_history.Absolute.t ->
+  are_rebuilding_terms:Are_rebuilding_terms.t ->
+  Call_site_inlining_decision_type.t ->
+  unit
+
+val record_decision_at_call_site_for_unknown_function :
+  tracker:Inlining_history.Tracker.t ->
+  apply:Apply_expr.t ->
+  pass:Pass.t ->
+  unit ->
+  unit
+
+val record_decision_at_function_definition :
+  absolute_history:Inlining_history.Absolute.t ->
+  code_metadata:Code_metadata.t ->
+  pass:Pass.t ->
+  are_rebuilding_terms:Are_rebuilding_terms.t ->
+  Function_decl_inlining_decision_type.t ->
+  unit
 
 (** Output the report for all recorded decisions up to that point, and
     clean/forget all decisions.
 
     Note that this function should be called once for each round of
     simplification. *)
-val output_then_forget_decisions : output_prefix:string -> unit
+val output_then_forget_decisions : output_prefix:string -> Inlining_tree.t

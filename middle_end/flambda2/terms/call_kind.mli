@@ -16,70 +16,112 @@
 
 (** Classification of application expressions. *)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 module Function_call : sig
   type t = private
-    | Direct of
-        { code_id : Code_id.t;
-              (** The [code_id] uniquely determines the function symbol that
-                  must be called. *)
-          closure_id : Closure_id.t;
-              (** The [closure_id] identifies which closure is to be passed to
-                  the function. *)
-          return_arity : Flambda_arity.With_subkinds.t
-              (** [return_arity] describes what the callee returns. It matches
-                  up with the arity of [continuation] in the enclosing [Apply.t]
-                  record. *)
-        }
+    | Direct of Code_id.t
+        (** The [code_id] uniquely determines the function symbol that
+            must be called. *)
     | Indirect_unknown_arity
-    | Indirect_known_arity of
-        { param_arity : Flambda_arity.With_subkinds.t;
-          return_arity : Flambda_arity.With_subkinds.t
-        }
+    | Indirect_known_arity
 end
 
-type method_kind =
-  | Self
-  | Public
-  | Cached
+module Method_kind : sig
+  type t = private
+    | Self
+    | Public
+    | Cached
+
+  val from_lambda : Lambda.meth_kind -> t
+
+  val to_lambda : t -> Lambda.meth_kind
+end
+
+(* CR mshinwell: consider refactoring [Call_kind] so that there wouldn't be a
+   separate callee field for cases like this. *)
+
+(** Algebraic effect operations.  The corresponding [Apply_expr] will have the
+    callee set to [None] and an empty argument list for these.  This is done
+    to ensure there is no confusion between the different [Simple]s. *)
+module Effect : sig
+  type t = private
+    | Perform of { eff : Simple.t }
+    | Reperform of
+        { eff : Simple.t;
+          cont : Simple.t;
+          last_fiber : Simple.t
+        }
+    | Run_stack of
+        { stack : Simple.t;
+          f : Simple.t;
+          arg : Simple.t
+        }
+    | Resume of
+        { stack : Simple.t;
+          f : Simple.t;
+          arg : Simple.t;
+          last_fiber : Simple.t
+        }
+
+  include Contains_names.S with type t := t
+
+  val perform : eff:Simple.t -> t
+
+  val reperform : eff:Simple.t -> cont:Simple.t -> last_fiber:Simple.t -> t
+
+  val run_stack : stack:Simple.t -> f:Simple.t -> arg:Simple.t -> t
+
+  val resume :
+    stack:Simple.t -> f:Simple.t -> arg:Simple.t -> last_fiber:Simple.t -> t
+end
+
+(* The allocation mode corresponds to the type of the function that is called:
+   if the function has return mode [Heap], then the alloc_mode is [Heap] as
+   well; if the function has return mode [Local], then the alloc_mode is [Local
+   {region}] where the result must be allocated in the region [region]. Note
+   that even if the result does not need to be allocated (as in [unit -> local_
+   unit]), the function is still permitted to allocate in [region] in that
+   case. *)
 
 (** Whether an application expression corresponds to an OCaml function
     invocation, an OCaml method invocation, or an external call. *)
 type t = private
-  | Function of Function_call.t
+  | Function of
+      { function_call : Function_call.t;
+        alloc_mode : Alloc_mode.For_applications.t
+      }
   | Method of
-      { kind : method_kind;
-        obj : Simple.t
+      { kind : Method_kind.t;
+        obj : Simple.t;
+        alloc_mode : Alloc_mode.For_applications.t
       }
   | C_call of
-      { alloc : bool;
-        param_arity : Flambda_arity.t;
-        return_arity : Flambda_arity.t;
-        is_c_builtin : bool
+      { needs_caml_c_call : bool;
+        is_c_builtin : bool;
+        effects : Effects.t;
+        coeffects : Coeffects.t;
+        alloc_mode : Alloc_mode.For_applications.t
       }
+  | Effect of Effect.t
 
 include Expr_std.S with type t := t
 
 include Contains_ids.S with type t := t
 
-val direct_function_call :
-  Code_id.t -> Closure_id.t -> return_arity:Flambda_arity.With_subkinds.t -> t
+val direct_function_call : Code_id.t -> Alloc_mode.For_applications.t -> t
 
-val indirect_function_call_unknown_arity : unit -> t
+val indirect_function_call_unknown_arity : Alloc_mode.For_applications.t -> t
 
-val indirect_function_call_known_arity :
-  param_arity:Flambda_arity.With_subkinds.t ->
-  return_arity:Flambda_arity.With_subkinds.t ->
-  t
+val indirect_function_call_known_arity : Alloc_mode.For_applications.t -> t
 
-val method_call : method_kind -> obj:Simple.t -> t
+val method_call :
+  Method_kind.t -> obj:Simple.t -> Alloc_mode.For_applications.t -> t
 
 val c_call :
-  alloc:bool ->
-  param_arity:Flambda_arity.t ->
-  return_arity:Flambda_arity.t ->
+  needs_caml_c_call:bool ->
   is_c_builtin:bool ->
+  effects:Effects.t ->
+  coeffects:Coeffects.t ->
+  Alloc_mode.For_applications.t ->
   t
 
-val return_arity : t -> Flambda_arity.With_subkinds.t
+val effect : Effect.t -> t

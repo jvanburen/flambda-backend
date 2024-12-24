@@ -14,162 +14,317 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
-(* CR-someday xclerc: we could add annotations to external declarations (akin to
-   [@@noalloc]) in order to be able to refine the computation of
-   effects/coeffects for such functions. *)
-
-let check_arity arity =
-  match arity with [] -> Misc.fatal_error "Invalid empty arity" | _ :: _ -> ()
-
 let fprintf = Format.fprintf
 
 module Function_call = struct
   type t =
-    | Direct of
-        { code_id : Code_id.t;
-          closure_id : Closure_id.t;
-          return_arity : Flambda_arity.With_subkinds.t
-        }
+    | Direct of Code_id.t
     | Indirect_unknown_arity
-    | Indirect_known_arity of
-        { param_arity : Flambda_arity.With_subkinds.t;
-          return_arity : Flambda_arity.With_subkinds.t
-        }
+    | Indirect_known_arity
 
-  let [@ocamlformat "disable"] print ppf call =
+  let print ppf call =
     match call with
-    | Direct { code_id; closure_id; return_arity; } ->
-      fprintf ppf "@[<hov 1>(Direct@ \
-          @[<hov 1>(code_id@ %a)@]@ \
-          @[<hov 1>(closure_id@ %a)@]@ \
-          @[<hov 1>(return_arity@ %a)@]\
-          )@]"
-        Code_id.print code_id
-        Closure_id.print closure_id
-        Flambda_arity.With_subkinds.print return_arity
-    | Indirect_unknown_arity ->
-      fprintf ppf "Indirect_unknown_arity"
-    | Indirect_known_arity { param_arity; return_arity; } ->
-      fprintf ppf "@[(Indirect_known_arity %a \u{2192} %a)@]"
-        Flambda_arity.With_subkinds.print param_arity
-        Flambda_arity.With_subkinds.print return_arity
-
-  let return_arity call =
-    match call with
-    | Direct { return_arity; _ } | Indirect_known_arity { return_arity; _ } ->
-      return_arity
-    | Indirect_unknown_arity -> [Flambda_kind.With_subkind.any_value]
+    | Direct code_id ->
+      fprintf ppf "@[<hov 1>(Direct %a)@]" Code_id.print code_id
+    | Indirect_unknown_arity -> fprintf ppf "Indirect_unknown_arity"
+    | Indirect_known_arity -> fprintf ppf "Indirect_known_arity"
 end
 
-type method_kind =
-  | Self
-  | Public
-  | Cached
+module Method_kind = struct
+  type t =
+    | Self
+    | Public
+    | Cached
 
-let print_method_kind ppf kind =
-  match kind with
-  | Self -> fprintf ppf "Self"
-  | Public -> fprintf ppf "Public"
-  | Cached -> fprintf ppf "Cached"
+  let print ppf t =
+    match t with
+    | Self -> fprintf ppf "Self"
+    | Public -> fprintf ppf "Public"
+    | Cached -> fprintf ppf "Cached"
+
+  let from_lambda (kind : Lambda.meth_kind) =
+    match kind with Self -> Self | Public -> Public | Cached -> Cached
+
+  let to_lambda t : Lambda.meth_kind =
+    match t with Self -> Self | Public -> Public | Cached -> Cached
+end
+
+module Effect = struct
+  type t =
+    | Perform of { eff : Simple.t }
+    | Reperform of
+        { eff : Simple.t;
+          cont : Simple.t;
+          last_fiber : Simple.t
+        }
+    | Run_stack of
+        { stack : Simple.t;
+          f : Simple.t;
+          arg : Simple.t
+        }
+    | Resume of
+        { stack : Simple.t;
+          f : Simple.t;
+          arg : Simple.t;
+          last_fiber : Simple.t
+        }
+
+  let print ppf t =
+    match t with
+    | Perform { eff } ->
+      fprintf ppf "@[<hov 1>(%tPerform%t@ %a)@]" Flambda_colours.effect
+        Flambda_colours.pop Simple.print eff
+    | Reperform { eff; cont; last_fiber } ->
+      fprintf ppf
+        "@[<hov 1>(%tReperform%t@ (eff@ %a)@ (cont@ %a)@ (last_fiber@ %a))@]"
+        Flambda_colours.effect Flambda_colours.pop Simple.print eff Simple.print
+        cont Simple.print last_fiber
+    | Run_stack { stack; f; arg } ->
+      fprintf ppf "@[<hov 1>(%tRun_stack%t (stack@ %a)@ (f@ %a)@ (arg@ %a))@]"
+        Flambda_colours.effect Flambda_colours.pop Simple.print stack
+        Simple.print f Simple.print arg
+    | Resume { stack; f; arg; last_fiber } ->
+      fprintf ppf
+        "@[<hov 1>(%tResume%t (stack@ %a)@ (f@ %a)@ (arg@ %a) (last_fiber@ \
+         %a))@]"
+        Flambda_colours.effect Flambda_colours.pop Simple.print stack
+        Simple.print f Simple.print arg Simple.print last_fiber
+
+  let perform ~eff = Perform { eff }
+
+  let reperform ~eff ~cont ~last_fiber = Reperform { eff; cont; last_fiber }
+
+  let run_stack ~stack ~f ~arg = Run_stack { stack; f; arg }
+
+  let resume ~stack ~f ~arg ~last_fiber = Resume { stack; f; arg; last_fiber }
+
+  let free_names t =
+    match t with
+    | Perform { eff } -> Simple.free_names eff
+    | Reperform { eff; cont; last_fiber } ->
+      Name_occurrences.union (Simple.free_names eff)
+        (Name_occurrences.union (Simple.free_names cont)
+           (Simple.free_names last_fiber))
+    | Run_stack { stack; f; arg } ->
+      Name_occurrences.union (Simple.free_names stack)
+        (Name_occurrences.union (Simple.free_names f) (Simple.free_names arg))
+    | Resume { stack; f; arg; last_fiber } ->
+      Name_occurrences.union (Simple.free_names stack)
+        (Name_occurrences.union (Simple.free_names f)
+           (Name_occurrences.union (Simple.free_names arg)
+              (Simple.free_names last_fiber)))
+
+  let apply_renaming t renaming =
+    match t with
+    | Perform { eff } ->
+      let eff' = Simple.apply_renaming eff renaming in
+      if eff == eff' then t else Perform { eff = eff' }
+    | Reperform { eff; cont; last_fiber } ->
+      let eff' = Simple.apply_renaming eff renaming in
+      let cont' = Simple.apply_renaming cont renaming in
+      let last_fiber' = Simple.apply_renaming last_fiber renaming in
+      if eff == eff' && cont == cont' && last_fiber == last_fiber'
+      then t
+      else Reperform { eff = eff'; cont = cont'; last_fiber = last_fiber' }
+    | Run_stack { stack; f; arg } ->
+      let stack' = Simple.apply_renaming stack renaming in
+      let f' = Simple.apply_renaming f renaming in
+      let arg' = Simple.apply_renaming arg renaming in
+      if stack == stack' && f == f' && arg == arg'
+      then t
+      else Run_stack { stack = stack'; f = f'; arg = arg' }
+    | Resume { stack; f; arg; last_fiber } ->
+      let stack' = Simple.apply_renaming stack renaming in
+      let f' = Simple.apply_renaming f renaming in
+      let arg' = Simple.apply_renaming arg renaming in
+      let last_fiber' = Simple.apply_renaming last_fiber renaming in
+      if stack == stack' && f == f' && arg == arg' && last_fiber == last_fiber'
+      then t
+      else
+        Resume { stack = stack'; f = f'; arg = arg'; last_fiber = last_fiber' }
+
+  let ids_for_export t =
+    match t with
+    | Perform { eff } -> Ids_for_export.from_simple eff
+    | Reperform { eff; cont; last_fiber } ->
+      Ids_for_export.union
+        (Ids_for_export.from_simple eff)
+        (Ids_for_export.union
+           (Ids_for_export.from_simple cont)
+           (Ids_for_export.from_simple last_fiber))
+    | Run_stack { stack; f; arg } ->
+      Ids_for_export.union
+        (Ids_for_export.from_simple stack)
+        (Ids_for_export.union
+           (Ids_for_export.from_simple f)
+           (Ids_for_export.from_simple arg))
+    | Resume { stack; f; arg; last_fiber } ->
+      Ids_for_export.union
+        (Ids_for_export.from_simple stack)
+        (Ids_for_export.union
+           (Ids_for_export.from_simple f)
+           (Ids_for_export.union
+              (Ids_for_export.from_simple arg)
+              (Ids_for_export.from_simple last_fiber)))
+end
 
 type t =
-  | Function of Function_call.t
+  | Function of
+      { function_call : Function_call.t;
+        alloc_mode : Alloc_mode.For_applications.t
+      }
   | Method of
-      { kind : method_kind;
-        obj : Simple.t
+      { kind : Method_kind.t;
+        obj : Simple.t;
+        alloc_mode : Alloc_mode.For_applications.t
       }
   | C_call of
-      { alloc : bool;
-        param_arity : Flambda_arity.t;
-        return_arity : Flambda_arity.t;
-        is_c_builtin : bool
+      { needs_caml_c_call : bool;
+        is_c_builtin : bool;
+        effects : Effects.t;
+        coeffects : Coeffects.t;
+        alloc_mode : Alloc_mode.For_applications.t
       }
+  | Effect of Effect.t
 
 let [@ocamlformat "disable"] print ppf t =
   match t with
-  | Function call -> Function_call.print ppf call
-  | Method { kind; obj; } ->
-    fprintf ppf "@[(Method %a : %a)@]"
+  | Function { function_call; alloc_mode } ->
+    fprintf ppf "@[<hov 1>(Function@ \
+        @[<hov 1>(function_call@ %a)@]@ \
+        @[<hov 1>(alloc_mode@ %a)@]\
+        )@]"
+      Function_call.print function_call
+      Alloc_mode.For_applications.print alloc_mode
+  | Method { kind; obj; alloc_mode } ->
+    fprintf ppf "@[<hov 1>(Method@ \
+        @[<hov 1>(obj@ %a)@]@ \
+        @[<hov 1>(kind@ %a)@]@ \
+        @[<hov 1>(alloc_mode@ %a)@]\
+        )@]"
       Simple.print obj
-      print_method_kind kind
-  | C_call { alloc; param_arity; return_arity; is_c_builtin; } ->
-    fprintf ppf "@[(C@ @[(alloc %b)@]@ @[(is_c_builtin %b)@]@ \
-        @<0>%s@<1>\u{2237}@<0>%s %a @<1>\u{2192} %a)@]"
-      alloc
+      Method_kind.print kind
+      Alloc_mode.For_applications.print alloc_mode
+  | C_call { needs_caml_c_call; is_c_builtin; effects; coeffects; alloc_mode } ->
+    fprintf ppf "@[<hov 1>(C@ \
+        @[<hov 1>(needs_caml_c_call@ %b)@]@ \
+        @[<hov 1>(is_c_builtin@ %b)@]@ \
+        @[<hov 1>(effects@ %a)@]@ \
+        @[<hov 1>(coeffects@ %a)@]@ \
+        @[<hov 1>(alloc_mode@ %a)@]\
+        )@]"
+      needs_caml_c_call
       is_c_builtin
-      (Flambda_colours.elide ())
-      (Flambda_colours.normal ())
-      Flambda_arity.print param_arity
-      Flambda_arity.print return_arity
+      Alloc_mode.For_applications.print alloc_mode
+      Effects.print effects
+      Coeffects.print coeffects
+  | Effect effect_op -> Effect.print ppf effect_op
 
-let direct_function_call code_id closure_id ~return_arity =
-  check_arity return_arity;
-  Function (Direct { code_id; closure_id; return_arity })
+let direct_function_call code_id alloc_mode =
+  Function { function_call = Direct code_id; alloc_mode }
 
-let indirect_function_call_unknown_arity () = Function Indirect_unknown_arity
+let indirect_function_call_unknown_arity alloc_mode =
+  Function { function_call = Indirect_unknown_arity; alloc_mode }
 
-let indirect_function_call_known_arity ~param_arity ~return_arity =
-  check_arity return_arity;
-  Function (Indirect_known_arity { param_arity; return_arity })
+let indirect_function_call_known_arity alloc_mode =
+  Function { function_call = Indirect_known_arity; alloc_mode }
 
-let method_call kind ~obj = Method { kind; obj }
+let method_call kind ~obj alloc_mode = Method { kind; obj; alloc_mode }
 
-let c_call ~alloc ~param_arity ~return_arity ~is_c_builtin =
-  begin
-    match return_arity with
-    | [] | [_] -> ()
-    | _ :: _ :: _ ->
-      Misc.fatal_errorf "Illegal return arity for C call: %a"
-        Flambda_arity.print return_arity
-  end;
-  C_call { alloc; param_arity; return_arity; is_c_builtin }
+let c_call ~needs_caml_c_call ~is_c_builtin ~effects ~coeffects alloc_mode =
+  C_call { needs_caml_c_call; is_c_builtin; effects; coeffects; alloc_mode }
 
-let return_arity t =
-  match t with
-  | Function call -> Function_call.return_arity call
-  | Method _ -> [Flambda_kind.With_subkind.any_value]
-  | C_call { return_arity; _ } ->
-    List.map
-      (fun kind -> Flambda_kind.With_subkind.create kind Anything)
-      return_arity
+let effect eff = Effect eff
 
 let free_names t =
   match t with
-  | Function (Direct { code_id; closure_id = _; return_arity = _ }) ->
-    Name_occurrences.add_code_id Name_occurrences.empty code_id Name_mode.normal
-  | Function Indirect_unknown_arity
-  | Function (Indirect_known_arity { param_arity = _; return_arity = _ })
-  | C_call { alloc = _; param_arity = _; return_arity = _; is_c_builtin = _ } ->
-    Name_occurrences.empty
-  | Method { kind = _; obj } ->
-    Simple.pattern_match obj
-      ~name:(fun obj ~coercion:_ ->
-        Name_occurrences.singleton_name obj Name_mode.normal)
-      ~const:(fun _ -> Name_occurrences.empty)
+  | Function { function_call = Direct code_id; alloc_mode } ->
+    Name_occurrences.add_code_id
+      (Alloc_mode.For_applications.free_names alloc_mode)
+      code_id Name_mode.normal
+  | Function { function_call = Indirect_unknown_arity; alloc_mode }
+  | Function { function_call = Indirect_known_arity; alloc_mode } ->
+    Alloc_mode.For_applications.free_names alloc_mode
+  | C_call
+      { needs_caml_c_call = _;
+        is_c_builtin = _;
+        effects = _;
+        coeffects = _;
+        alloc_mode
+      } ->
+    Alloc_mode.For_applications.free_names alloc_mode
+  | Method { kind = _; obj; alloc_mode } ->
+    Name_occurrences.union (Simple.free_names obj)
+      (Alloc_mode.For_applications.free_names alloc_mode)
+  | Effect op -> Effect.free_names op
 
-let apply_renaming t perm =
+let apply_renaming t renaming =
   match t with
-  | Function (Direct { code_id; closure_id; return_arity }) ->
-    let code_id' = Renaming.apply_code_id perm code_id in
-    if code_id == code_id'
+  | Function { function_call = Direct code_id; alloc_mode } ->
+    let code_id' = Renaming.apply_code_id renaming code_id in
+    let alloc_mode' =
+      Alloc_mode.For_applications.apply_renaming alloc_mode renaming
+    in
+    if code_id == code_id' && alloc_mode == alloc_mode'
     then t
-    else Function (Direct { code_id = code_id'; closure_id; return_arity })
-  | Function Indirect_unknown_arity
-  | Function (Indirect_known_arity { param_arity = _; return_arity = _ })
-  | C_call { alloc = _; param_arity = _; return_arity = _; is_c_builtin = _ } ->
-    t
-  | Method { kind; obj } ->
-    let obj' = Simple.apply_renaming obj perm in
-    if obj == obj' then t else Method { kind; obj = obj' }
+    else Function { function_call = Direct code_id'; alloc_mode = alloc_mode' }
+  | Function
+      { function_call =
+          (Indirect_unknown_arity | Indirect_known_arity) as function_call;
+        alloc_mode
+      } ->
+    let alloc_mode' =
+      Alloc_mode.For_applications.apply_renaming alloc_mode renaming
+    in
+    if alloc_mode == alloc_mode'
+    then t
+    else Function { function_call; alloc_mode = alloc_mode' }
+  | C_call { needs_caml_c_call; is_c_builtin; effects; coeffects; alloc_mode }
+    ->
+    let alloc_mode' =
+      Alloc_mode.For_applications.apply_renaming alloc_mode renaming
+    in
+    if alloc_mode == alloc_mode'
+    then t
+    else
+      C_call
+        { needs_caml_c_call;
+          is_c_builtin;
+          effects;
+          coeffects;
+          alloc_mode = alloc_mode'
+        }
+  | Method { kind; obj; alloc_mode } ->
+    let obj' = Simple.apply_renaming obj renaming in
+    let alloc_mode' =
+      Alloc_mode.For_applications.apply_renaming alloc_mode renaming
+    in
+    if obj == obj' && alloc_mode == alloc_mode'
+    then t
+    else Method { kind; obj = obj'; alloc_mode = alloc_mode' }
+  | Effect op ->
+    let op' = Effect.apply_renaming op renaming in
+    if op == op' then t else Effect op'
 
-let all_ids_for_export t =
+let ids_for_export t =
   match t with
-  | Function (Direct { code_id; closure_id = _; return_arity = _ }) ->
-    Ids_for_export.add_code_id Ids_for_export.empty code_id
-  | Function Indirect_unknown_arity
-  | Function (Indirect_known_arity { param_arity = _; return_arity = _ })
-  | C_call { alloc = _; param_arity = _; return_arity = _; is_c_builtin = _ } ->
-    Ids_for_export.empty
-  | Method { kind = _; obj } -> Ids_for_export.from_simple obj
+  | Function { function_call = Direct code_id; alloc_mode } ->
+    Ids_for_export.add_code_id
+      (Alloc_mode.For_applications.ids_for_export alloc_mode)
+      code_id
+  | Function { function_call = Indirect_unknown_arity; alloc_mode }
+  | Function { function_call = Indirect_known_arity; alloc_mode } ->
+    Alloc_mode.For_applications.ids_for_export alloc_mode
+  | C_call
+      { needs_caml_c_call = _;
+        is_c_builtin = _;
+        effects = _;
+        coeffects = _;
+        alloc_mode
+      } ->
+    Alloc_mode.For_applications.ids_for_export alloc_mode
+  | Method { kind = _; obj; alloc_mode } ->
+    Ids_for_export.union
+      (Ids_for_export.from_simple obj)
+      (Alloc_mode.For_applications.ids_for_export alloc_mode)
+  | Effect op -> Effect.ids_for_export op

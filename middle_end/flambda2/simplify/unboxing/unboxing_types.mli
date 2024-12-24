@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 open! Simplify_import
 
 (* Typedefs for unboxing decisions *)
@@ -26,6 +24,9 @@ type do_not_unbox_reason =
   | Max_depth_exceeded
   | Incomplete_parameter_type
   | Not_enough_information_at_use
+  | Not_of_kind_value
+  | Unboxing_not_requested
+  | All_fields_invalid
 
 module Extra_param_and_args : sig
   type t = private
@@ -41,16 +42,18 @@ end
 type unboxing_decision =
   | Unique_tag_and_size of
       { tag : Tag.t;
+        shape : Flambda_kind.Block_shape.t;
         fields : field_decision list
       }
   | Variant of
       { tag : Extra_param_and_args.t;
         const_ctors : const_ctors_decision;
-        fields_by_tag : field_decision list Tag.Scannable.Map.t
+        fields_by_tag :
+          (Flambda_kind.Block_shape.t * field_decision list) Tag.Scannable.Map.t
       }
   | Closure_single_entry of
-      { closure_id : Closure_id.t;
-        vars_within_closure : field_decision Var_within_closure.Map.t
+      { function_slot : Function_slot.t;
+        vars_within_closure : field_decision Value_slot.Map.t
       }
   (* By "single entry" we mean that the corresponding set of closures only
      contains a single closure. *)
@@ -58,7 +61,8 @@ type unboxing_decision =
 
 and field_decision =
   { epa : Extra_param_and_args.t;
-    decision : decision
+    decision : decision;
+    kind : Flambda_kind.With_subkind.t
   }
 
 and const_ctors_decision =
@@ -78,7 +82,8 @@ val print_decision : Format.formatter -> decision -> unit
 module Decisions : sig
   type t =
     { decisions : (BP.t * decision) list;
-      rewrite_ids_seen : Apply_cont_rewrite_id.Set.t
+      rewrite_ids_seen : Apply_cont_rewrite_id.Set.t;
+      rewrites_ids_known_as_invalid : Apply_cont_rewrite_id.Set.t
     }
 
   val print : Format.formatter -> t -> unit
@@ -103,28 +108,14 @@ end
    Thus, the first pass is used to filter out decisions which would end up in
    the third case. *)
 type pass =
-  | Filter of { recursive : bool }
+  | Filter
   (* First pass when computing unboxing decisions. This is done before
      inspecting the handler of the continuation whose parameters we are trying
      to unbox. For a non-recursive continuation, that means that all use sites
      of the continuation are known, but for recursive continuations, there are
-     likely use sites that are not known at this point.
-
-     For recursive continuations, we need to prevent unboxing variants and
-     closures because we cannot be sure that reasonable extra_args can be
-     computed for all use sites. For instance: *)
-  (*
-   * let rec cont k x y =
-   *   switch y with
-   *   | 0 -> k (Some x)
-   *   | 1 -> k (f x) (* for some function f in scope *)
-   *)
-  (* In this case, even if we know that x is an option, to unbox it we'd need to
-     introduce a switch in the `1` branch. This is:
-
-     1) not implemented (although technically possible)
-
-     2) not efficient or beneficial in most cases. *)
+     likely use sites that are not known at this point, so we only keep the
+     original decision and depend on the fact that we do not generate unboxing
+     decisions for variants and closures in the recursive case. *)
   | Compute_all_extra_args
 (* Last pass, after the traversal of the handler of the continuation. Thus, at
    this point, all use-sites are known, and we can compute the extra args that

@@ -26,6 +26,7 @@
 [@@@ocaml.warning "+a-30-40-41-42"]
 
 module CL = Cfg_with_layout
+module DLL = Flambda_backend_utils.Doubly_linked_list
 
 let add cl =
   (* Fabricate debug info when missing, because it is required to emit discriminators.
@@ -39,7 +40,7 @@ let add cl =
    *          Lreloadretaddr
    *          Llabel
    *          Lentertrap
-   *          Ladjust_trap_depth
+   *          Ladjust_stack_offset
    *    There is nothing wrong with emitting .loc directives for them,
    *    but its redundant.
    *    Only Lreloadretaddr has a corresponding Cfg instruction.
@@ -50,17 +51,15 @@ let add cl =
       then prev
       else i.dbg
     in
-    let fdo = Fdo_info.create ~discriminator:i.id ~dbg in
-    dbg, { i with fdo }
+    i.fdo <- Fdo_info.create ~discriminator:i.id ~dbg;
+    dbg
   in
   let cfg = CL.cfg cl in
   let layout = CL.layout cl in
   let update_block prev label =
     let block = Cfg.get_block_exn cfg label in
-    let prev, new_body = List.fold_left_map update_instr prev block.body in
-    block.body <- new_body;
-    let prev, new_terminator = update_instr prev block.terminator in
-    block.terminator <- new_terminator;
+    let prev = DLL.fold_left ~f:update_instr ~init:prev block.body in
+    let prev = update_instr prev block.terminator in
     prev
   in
-  ignore (List.fold_left update_block cfg.fun_dbg layout : Debuginfo.t)
+  ignore (DLL.fold_left ~f:update_block ~init:cfg.fun_dbg layout : Debuginfo.t)

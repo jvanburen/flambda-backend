@@ -14,17 +14,14 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 open! Simplify_import
 module A = Number_adjuncts
-module Float_by_bit_pattern = Numeric_types.Float_by_bit_pattern
 
 type 'a binary_arith_outcome_for_one_side_only =
   | Exactly of 'a
   | The_other_side
   | Negation_of_the_other_side
-  | Float_negation_of_the_other_side
+  | Float_negation_of_the_other_side of Flambda_primitive.float_bitwidth
   | Cannot_simplify
   | Invalid
 
@@ -47,15 +44,15 @@ module type Binary_arith_like_sig = sig
 
   val term : Result.t -> Named.t
 
-  val prover_lhs : T.Typing_env.t -> T.t -> Lhs.Set.t T.proof
+  val prover_lhs : T.Typing_env.t -> T.t -> Lhs.Set.t T.meet_shortcut
 
-  val prover_rhs : T.Typing_env.t -> T.t -> Rhs.Set.t T.proof
+  val prover_rhs : T.Typing_env.t -> T.t -> Rhs.Set.t T.meet_shortcut
 
   type op
 
   val unknown : op -> T.t
 
-  val these : Result.Set.t -> T.t
+  val these : Result.Set.t -> T.t * Simple.t option
 
   val op : op -> Lhs.t -> Rhs.t -> Result.t option
 
@@ -77,7 +74,7 @@ module Binary_arith_like (N : Binary_arith_like_sig) : sig
     arg2:Simple.t ->
     arg2_ty:Flambda2_types.t ->
     result_var:Bound_var.t ->
-    Simplified_named.t * DA.t
+    SPR.t
 end = struct
   module Possible_result = struct
     type t =
@@ -133,11 +130,11 @@ end = struct
     let kind = N.result_kind in
     let[@inline always] result_unknown () =
       let dacc = DA.add_variable dacc result_var (N.unknown op) in
-      Simplified_named.reachable original_term ~try_reify:false, dacc
+      SPR.create original_term ~try_reify:false dacc
     in
     let[@inline always] result_invalid () =
       let dacc = DA.add_variable dacc result_var (T.bottom kind) in
-      Simplified_named.invalid (), dacc
+      SPR.create_invalid dacc
     in
     let check_possible_results ~possible_results =
       if PR.Set.is_empty possible_results
@@ -150,7 +147,7 @@ end = struct
           | Some (Simple simple) -> Named.create_simple simple
           | None -> original_term
         in
-        let ty =
+        let ty, simple_opt =
           let is =
             List.filter_map
               (fun (possible_result : PR.t) ->
@@ -163,16 +160,15 @@ end = struct
           then N.these (N.Result.Set.of_list is)
           else
             match PR.Set.get_singleton possible_results with
-            | Some (Simple simple) -> T.alias_type_of kind simple
-            | Some (Exactly _) | Some (Prim _) | None -> N.unknown op
+            | Some (Simple simple) -> T.alias_type_of kind simple, Some simple
+            | Some (Exactly _) | Some (Prim _) | None -> N.unknown op, None
         in
         let dacc = DA.add_variable dacc result_var ty in
-        match T.get_alias_exn ty with
-        | exception Not_found ->
-          Simplified_named.reachable named ~try_reify:false, dacc
-        | simple ->
+        match simple_opt with
+        | None -> SPR.create named ~try_reify:false dacc
+        | Some simple ->
           let named = Named.create_simple simple in
-          Simplified_named.reachable named ~try_reify:false, dacc
+          SPR.create named ~try_reify:false dacc
     in
     let only_one_side_known op nums ~folder ~other_side =
       let possible_results =
@@ -194,7 +190,7 @@ end = struct
                   | Naked_int32 -> Naked_int32
                   | Naked_int64 -> Naked_int64
                   | Naked_nativeint -> Naked_nativeint
-                  | Naked_float ->
+                  | Naked_float | Naked_float32 ->
                     Misc.fatal_error
                       "Cannot use [Negation_of_the_other_side] with floats; \
                        use the float version instead"
@@ -203,8 +199,8 @@ end = struct
                   Unary (Int_arith (standard_int_kind, Neg), other_side)
                 in
                 Some (PR.Set.add (Prim prim) possible_results)
-              | Float_negation_of_the_other_side ->
-                let prim : P.t = Unary (Float_arith Neg, other_side) in
+              | Float_negation_of_the_other_side width ->
+                let prim : P.t = Unary (Float_arith (width, Neg), other_side) in
                 Some (PR.Set.add (Prim prim) possible_results)
               | Cannot_simplify -> None
               | Invalid -> Some possible_results))
@@ -215,7 +211,7 @@ end = struct
       | None -> result_unknown ()
     in
     match proof1, proof2 with
-    | Proved nums1, Proved nums2 when N.ok_to_evaluate denv ->
+    | Known_result nums1, Known_result nums2 when N.ok_to_evaluate denv ->
       assert (not (N.Lhs.Set.is_empty nums1));
       assert (not (N.Rhs.Set.is_empty nums2));
       if N.Lhs.Set.cardinal nums1 > max_num_possible_results
@@ -232,17 +228,18 @@ end = struct
             all_pairs PR.Set.empty
         in
         check_possible_results ~possible_results
-    | Proved nums1, Unknown when N.ok_to_evaluate denv ->
+    | Known_result nums1, Need_meet when N.ok_to_evaluate denv ->
       assert (not (N.Lhs.Set.is_empty nums1));
       only_one_side_known
         (fun i -> N.op_rhs_unknown op ~lhs:i)
         nums1 ~folder:N.Lhs.Set.fold ~other_side:arg2
-    | Unknown, Proved nums2 when N.ok_to_evaluate denv ->
+    | Need_meet, Known_result nums2 when N.ok_to_evaluate denv ->
       assert (not (N.Rhs.Set.is_empty nums2));
       only_one_side_known
         (fun i -> N.op_lhs_unknown op ~rhs:i)
         nums2 ~folder:N.Rhs.Set.fold ~other_side:arg1
-    | (Proved _ | Unknown), (Proved _ | Unknown) -> result_unknown ()
+    | (Known_result _ | Need_meet), (Known_result _ | Need_meet) ->
+      result_unknown ()
     | Invalid, _ | _, Invalid -> result_invalid ()
 end
 [@@inline always]
@@ -272,12 +269,20 @@ end = struct
     match arg_kind with
     | Tagged_immediate -> T.any_tagged_immediate
     | Naked_immediate -> T.any_naked_immediate
+    | Naked_float32 -> T.any_naked_float32
     | Naked_float -> T.any_naked_float
     | Naked_int32 -> T.any_naked_int32
     | Naked_int64 -> T.any_naked_int64
     | Naked_nativeint -> T.any_naked_nativeint
 
-  let these = I.these_unboxed
+  let these s =
+    let ty = I.these_unboxed s in
+    let simple_opt =
+      match I.Num.Set.get_singleton s with
+      | None -> None
+      | Some i -> Some (Simple.const (I.Num.to_const i))
+    in
+    ty, simple_opt
 
   let term = I.term_unboxed
 
@@ -344,10 +349,12 @@ end = struct
     | Xor -> symmetric_op_one_side_unknown Xor ~this_side:rhs
     | Sub -> if Num.equal rhs Num.zero then The_other_side else Cannot_simplify
     | Div ->
-      (* CR mshinwell: We should think very carefully to make sure our handling
-         of division is correct. Also see whether unsafe division can be exposed
-         to the user. The current assumption that division by zero reaching here
-         is dead code. *)
+      (* Division ("safe" division, strictly speaking, in Lambda terminology) is
+         translated to a conditional on the denominator followed by an unsafe
+         division (the "Div" seen here) on the way into Flambda 2. So if the
+         denominator turns out to be zero here, via the typing or whatever, then
+         we're in unreachable code. *)
+      (* CR-someday mshinwell: Should we expose unsafe division to the user? *)
       if Num.equal rhs Num.zero
       then Invalid
       else if Num.equal rhs Num.one
@@ -419,18 +426,26 @@ end = struct
 
   let prover_lhs = I.unboxed_prover
 
-  let prover_rhs = T.prove_naked_immediates
+  let prover_rhs = T.meet_naked_immediates
 
   let unknown _ =
     match arg_kind with
     | Tagged_immediate -> T.any_tagged_immediate
     | Naked_immediate -> T.any_naked_immediate
+    | Naked_float32 -> T.any_naked_float32
     | Naked_float -> T.any_naked_float
     | Naked_int32 -> T.any_naked_int32
     | Naked_int64 -> T.any_naked_int64
     | Naked_nativeint -> T.any_naked_nativeint
 
-  let these = I.these_unboxed
+  let these s =
+    let ty = I.these_unboxed s in
+    let simple_opt =
+      match I.Num.Set.get_singleton s with
+      | None -> None
+      | Some i -> Some (Simple.const (I.Num.to_const i))
+    in
+    ty, simple_opt
 
   let term = I.term_unboxed
 
@@ -460,8 +475,8 @@ end = struct
 
   let op_lhs_unknown (op : P.int_shift_op) ~rhs :
       Num.t binary_arith_outcome_for_one_side_only =
-    let module O = Targetint_31_63.Imm in
-    let rhs = Targetint_31_63.to_targetint rhs in
+    let module O = Targetint_31_63 in
+    let rhs = rhs in
     match op with
     | Lsl | Lsr | Asr ->
       (* Shifting either way by [Targetint_32_64.size] or above, or by a
@@ -514,13 +529,13 @@ module Binary_int_shift_nativeint =
 module Int_ops_for_binary_comp (I : A.Int_number_kind) : sig
   include
     Binary_arith_like_sig
-      with type op = P.ordered_comparison P.comparison_behaviour
+      with type op = P.signed_or_unsigned P.comparison_behaviour
 end = struct
   module Lhs = I.Num
   module Rhs = I.Num
   module Result = Targetint_31_63
 
-  type op = P.ordered_comparison P.comparison_behaviour
+  type op = P.signed_or_unsigned P.comparison_behaviour
 
   let arg_kind = I.standard_int_or_float_kind
 
@@ -535,10 +550,17 @@ end = struct
   let unknown (op : op) =
     match op with
     | Yielding_bool _ -> T.these_naked_immediates Targetint_31_63.all_bools
-    | Yielding_int_like_compare_functions ->
+    | Yielding_int_like_compare_functions _signedness ->
       T.these_naked_immediates Targetint_31_63.zero_one_and_minus_one
 
-  let these = T.these_naked_immediates
+  let these s =
+    let ty = T.these_naked_immediates s in
+    let simple_opt =
+      match Targetint_31_63.Set.get_singleton s with
+      | None -> None
+      | Some i -> Some (Simple.const (Reg_width_const.naked_immediate i))
+    in
+    ty, simple_opt
 
   let term imm : Named.t =
     Named.create_simple (Simple.const (Reg_width_const.naked_immediate imm))
@@ -549,23 +571,39 @@ end = struct
 
   module Num = I.Num
 
-  let op (op : P.ordered_comparison P.comparison_behaviour) n1 n2 =
+  let op (op : P.signed_or_unsigned P.comparison_behaviour) n1 n2 =
     match op with
     | Yielding_bool op -> (
       let bool b = Targetint_31_63.bool b in
       match op with
-      | Lt -> Some (bool (Num.compare n1 n2 < 0))
-      | Gt -> Some (bool (Num.compare n1 n2 > 0))
-      | Le -> Some (bool (Num.compare n1 n2 <= 0))
-      | Ge -> Some (bool (Num.compare n1 n2 >= 0)))
-    | Yielding_int_like_compare_functions ->
-      let int i = Targetint_31_63.int (Targetint_31_63.Imm.of_int i) in
-      let c = Num.compare n1 n2 in
-      if c < 0
-      then Some (int (-1))
-      else if c = 0
-      then Some (int 0)
-      else Some (int 1)
+      | Eq -> Some (bool (Num.compare n1 n2 = 0))
+      | Neq -> Some (bool (Num.compare n1 n2 <> 0))
+      | Lt Signed -> Some (bool (Num.compare n1 n2 < 0))
+      | Gt Signed -> Some (bool (Num.compare n1 n2 > 0))
+      | Le Signed -> Some (bool (Num.compare n1 n2 <= 0))
+      | Ge Signed -> Some (bool (Num.compare n1 n2 >= 0))
+      | Lt Unsigned -> Some (bool (Num.compare_unsigned n1 n2 < 0))
+      | Gt Unsigned -> Some (bool (Num.compare_unsigned n1 n2 > 0))
+      | Le Unsigned -> Some (bool (Num.compare_unsigned n1 n2 <= 0))
+      | Ge Unsigned -> Some (bool (Num.compare_unsigned n1 n2 >= 0)))
+    | Yielding_int_like_compare_functions signed_or_unsigned -> (
+      match signed_or_unsigned with
+      | Signed ->
+        let int i = Targetint_31_63.of_int i in
+        let c = Num.compare n1 n2 in
+        if c < 0
+        then Some (int (-1))
+        else if c = 0
+        then Some (int 0)
+        else Some (int 1)
+      | Unsigned ->
+        let int i = Targetint_31_63.of_int i in
+        let c = Num.compare_unsigned n1 n2 in
+        if c < 0
+        then Some (int (-1))
+        else if c = 0
+        then Some (int 0)
+        else Some (int 1))
 
   let op_lhs_unknown _op ~rhs:_ = Cannot_simplify
 
@@ -590,115 +628,54 @@ module Binary_int_comp_int64 = Binary_arith_like (Int_ops_for_binary_comp_int64)
 module Binary_int_comp_nativeint =
   Binary_arith_like (Int_ops_for_binary_comp_nativeint)
 
-module Int_ops_for_binary_comp_unsigned (I : A.Int_number_kind) : sig
-  include
-    Binary_arith_like_sig
-      with type op = P.ordered_comparison P.comparison_behaviour
-end = struct
-  module Lhs = I.Num
-  module Rhs = I.Num
-  module Result = Targetint_31_63
+module Float_ops_for_binary_arith_gen (FP : sig
+  module F : Numeric_types.Float_by_bit_pattern
 
-  type op = P.ordered_comparison P.comparison_behaviour
+  val width : Flambda_primitive.float_bitwidth
 
-  let arg_kind = I.standard_int_or_float_kind
+  val arg_kind : K.Standard_int_or_float.t
 
-  let result_kind = K.naked_immediate
+  val result_kind : Flambda_kind.t
 
-  let ok_to_evaluate _env = true
+  val prover : T.Typing_env.t -> T.t -> F.Set.t T.meet_shortcut
 
-  let prover_lhs = I.unboxed_prover
+  val unknown : T.t
 
-  let prover_rhs = I.unboxed_prover
+  val these : F.Set.t -> T.t
 
-  let unknown (op : op) =
-    match op with
-    | Yielding_bool _ -> T.these_naked_immediates Targetint_31_63.all_bools
-    | Yielding_int_like_compare_functions ->
-      T.these_naked_immediates Targetint_31_63.zero_one_and_minus_one
-
-  let these = T.these_naked_immediates
-
-  let term imm : Named.t =
-    Named.create_simple (Simple.const (Reg_width_const.naked_immediate imm))
-
-  module Pair = I.Num.Pair
-
-  let cross_product = I.Num.cross_product
-
-  module Num = I.Num
-
-  let op (op : P.ordered_comparison P.comparison_behaviour) n1 n2 =
-    match op with
-    | Yielding_bool op -> (
-      let bool b = Targetint_31_63.bool b in
-      match op with
-      | Lt -> Some (bool (Num.compare_unsigned n1 n2 < 0))
-      | Gt -> Some (bool (Num.compare_unsigned n1 n2 > 0))
-      | Le -> Some (bool (Num.compare_unsigned n1 n2 <= 0))
-      | Ge -> Some (bool (Num.compare_unsigned n1 n2 >= 0)))
-    | Yielding_int_like_compare_functions ->
-      let int i = Targetint_31_63.int (Targetint_31_63.Imm.of_int i) in
-      let c = Num.compare_unsigned n1 n2 in
-      if c < 0
-      then Some (int (-1))
-      else if c = 0
-      then Some (int 0)
-      else Some (int 1)
-
-  let op_lhs_unknown _op ~rhs:_ = Cannot_simplify
-
-  let op_rhs_unknown _op ~lhs:_ = Cannot_simplify
-end
-[@@inline always]
-
-module Int_ops_for_binary_comp_unsigned_tagged_immediate =
-  Int_ops_for_binary_comp_unsigned (A.For_tagged_immediates)
-module Int_ops_for_binary_comp_unsigned_naked_immediate =
-  Int_ops_for_binary_comp_unsigned (A.For_naked_immediates)
-module Int_ops_for_binary_comp_unsigned_int32 =
-  Int_ops_for_binary_comp_unsigned (A.For_int32s)
-module Int_ops_for_binary_comp_unsigned_int64 =
-  Int_ops_for_binary_comp_unsigned (A.For_int64s)
-module Int_ops_for_binary_comp_unsigned_nativeint =
-  Int_ops_for_binary_comp_unsigned (A.For_nativeints)
-module Binary_int_comp_unsigned_tagged_immediate =
-  Binary_arith_like (Int_ops_for_binary_comp_unsigned_tagged_immediate)
-module Binary_int_comp_unsigned_naked_immediate =
-  Binary_arith_like (Int_ops_for_binary_comp_unsigned_naked_immediate)
-module Binary_int_comp_unsigned_int32 =
-  Binary_arith_like (Int_ops_for_binary_comp_unsigned_int32)
-module Binary_int_comp_unsigned_int64 =
-  Binary_arith_like (Int_ops_for_binary_comp_unsigned_int64)
-module Binary_int_comp_unsigned_nativeint =
-  Binary_arith_like (Int_ops_for_binary_comp_unsigned_nativeint)
-
-module Float_ops_for_binary_arith : sig
+  val const : F.t -> Const.t
+end) : sig
   include Binary_arith_like_sig with type op = P.binary_float_arith_op
 end = struct
-  module F = Float_by_bit_pattern
+  module F = FP.F
   module Lhs = F
   module Rhs = F
   module Result = F
 
   type op = P.binary_float_arith_op
 
-  let arg_kind = K.Standard_int_or_float.Naked_float
+  let arg_kind = FP.arg_kind
 
-  let result_kind = K.naked_float
+  let result_kind = FP.result_kind
 
-  let ok_to_evaluate denv = DE.float_const_prop denv
+  let ok_to_evaluate denv = DE.propagating_float_consts denv
 
-  let prover_lhs = T.prove_naked_floats
+  let prover_lhs = FP.prover
 
-  let prover_rhs = T.prove_naked_floats
+  let prover_rhs = FP.prover
 
-  let unknown _ = T.any_naked_float
+  let unknown _ = FP.unknown
 
-  let these = T.these_naked_floats
+  let these s =
+    let ty = FP.these s in
+    let simple_opt =
+      match F.Set.get_singleton s with
+      | None -> None
+      | Some f -> Some (Simple.const (FP.const f))
+    in
+    ty, simple_opt
 
-  let term f =
-    Named.create_simple (Simple.const (Reg_width_const.naked_float f))
+  let term f = Named.create_simple (Simple.const (FP.const f))
 
   module Pair = F.Pair
 
@@ -735,7 +712,7 @@ end = struct
         [@z3 check_float_binary_neutral `Mul 1.0 `Left]
       else if F.equal this_side F.minus_one
       then
-        Float_negation_of_the_other_side
+        Float_negation_of_the_other_side FP.width
         [@z3 check_float_binary_opposite `Mul (-1.0) `Left]
         [@z3 check_float_binary_opposite `Mul (-1.0) `Right]
       else Cannot_simplify
@@ -751,7 +728,7 @@ end = struct
       then The_other_side [@z3 check_float_binary_neutral `Div 1.0 `Right]
       else if F.equal rhs F.minus_one
       then
-        Float_negation_of_the_other_side
+        Float_negation_of_the_other_side FP.width
         [@z3 check_float_binary_opposite `Div (-1.0) `Right]
       else Cannot_simplify
 
@@ -764,36 +741,85 @@ end = struct
     | Div -> Cannot_simplify
 end
 
-module Binary_float_arith = Binary_arith_like (Float_ops_for_binary_arith)
+module Float_ops_for_binary_arith = Float_ops_for_binary_arith_gen (struct
+  module F = Numeric_types.Float_by_bit_pattern
 
-module Float_ops_for_binary_comp : sig
-  include
-    Binary_arith_like_sig with type op = P.comparison P.comparison_behaviour
+  let width = Flambda_primitive.Float64
+
+  let arg_kind = K.Standard_int_or_float.Naked_float
+
+  let result_kind = K.naked_float
+
+  let prover = T.meet_naked_floats
+
+  let unknown = T.any_naked_float
+
+  let these = T.these_naked_floats
+
+  let const = Reg_width_const.naked_float
+end)
+
+module Float32_ops_for_binary_arith = Float_ops_for_binary_arith_gen (struct
+  module F = Numeric_types.Float32_by_bit_pattern
+
+  let width = Flambda_primitive.Float32
+
+  let arg_kind = K.Standard_int_or_float.Naked_float32
+
+  let result_kind = K.naked_float32
+
+  let prover = T.meet_naked_float32s
+
+  let unknown = T.any_naked_float32
+
+  let these = T.these_naked_float32s
+
+  let const = Reg_width_const.naked_float32
+end)
+
+module Binary_float_arith = Binary_arith_like (Float_ops_for_binary_arith)
+module Binary_float32_arith = Binary_arith_like (Float32_ops_for_binary_arith)
+
+module Float_ops_for_binary_comp_gen (FP : sig
+  module F : Numeric_types.Float_by_bit_pattern
+
+  val arg_kind : K.Standard_int_or_float.t
+
+  val prover : T.Typing_env.t -> T.t -> F.Set.t T.meet_shortcut
+end) : sig
+  include Binary_arith_like_sig with type op = unit P.comparison_behaviour
 end = struct
-  module F = Float_by_bit_pattern
+  module F = FP.F
   module Lhs = F
   module Rhs = F
   module Result = Targetint_31_63
 
-  type op = P.comparison P.comparison_behaviour
+  type op = unit P.comparison_behaviour
 
-  let arg_kind = K.Standard_int_or_float.Naked_float
+  let arg_kind = FP.arg_kind
 
   let result_kind = K.naked_immediate
 
-  let ok_to_evaluate denv = DE.float_const_prop denv
+  let ok_to_evaluate denv = DE.propagating_float_consts denv
 
-  let prover_lhs = T.prove_naked_floats
+  let prover_lhs = FP.prover
 
-  let prover_rhs = T.prove_naked_floats
+  let prover_rhs = FP.prover
 
   let unknown (op : op) =
     match op with
     | Yielding_bool _ -> T.these_naked_immediates Targetint_31_63.all_bools
-    | Yielding_int_like_compare_functions ->
+    | Yielding_int_like_compare_functions () ->
       T.these_naked_immediates Targetint_31_63.zero_one_and_minus_one
 
-  let these = T.these_naked_immediates
+  let these s =
+    let ty = T.these_naked_immediates s in
+    let simple_opt =
+      match Targetint_31_63.Set.get_singleton s with
+      | None -> None
+      | Some i -> Some (Simple.const (Reg_width_const.naked_immediate i))
+    in
+    ty, simple_opt
 
   let term imm : Named.t =
     Named.create_simple (Simple.const (Reg_width_const.naked_immediate imm))
@@ -810,24 +836,24 @@ end = struct
       match op with
       | Eq -> Some (bool (F.IEEE_semantics.equal n1 n2))
       | Neq -> Some (bool (not (F.IEEE_semantics.equal n1 n2)))
-      | Lt ->
+      | Lt () ->
         if has_nan
         then Some (bool false)
         else Some (bool (F.IEEE_semantics.compare n1 n2 < 0))
-      | Gt ->
+      | Gt () ->
         if has_nan
         then Some (bool false)
         else Some (bool (F.IEEE_semantics.compare n1 n2 > 0))
-      | Le ->
+      | Le () ->
         if has_nan
         then Some (bool false)
         else Some (bool (F.IEEE_semantics.compare n1 n2 <= 0))
-      | Ge ->
+      | Ge () ->
         if has_nan
         then Some (bool false)
         else Some (bool (F.IEEE_semantics.compare n1 n2 >= 0)))
-    | Yielding_int_like_compare_functions ->
-      let int i = Targetint_31_63.int (Targetint_31_63.Imm.of_int i) in
+    | Yielding_int_like_compare_functions () ->
+      let int i = Targetint_31_63.of_int i in
       let c = F.IEEE_semantics.compare n1 n2 in
       if c < 0
       then Some (int (-1))
@@ -835,10 +861,10 @@ end = struct
       then Some (int 0)
       else Some (int 1)
 
-  let result_of_comparison_with_nan (op : P.comparison) =
+  let result_of_comparison_with_nan (op : unit P.comparison) =
     match op with
     | Neq -> Exactly Targetint_31_63.bool_true
-    | Eq | Lt | Gt | Le | Ge -> Exactly Targetint_31_63.bool_false
+    | Eq | Lt () | Gt () | Le () | Ge () -> Exactly Targetint_31_63.bool_false
 
   let op_lhs_unknown (op : op) ~rhs : _ binary_arith_outcome_for_one_side_only =
     match op with
@@ -846,7 +872,7 @@ end = struct
       if F.is_any_nan rhs
       then result_of_comparison_with_nan op
       else Cannot_simplify
-    | Yielding_int_like_compare_functions -> Cannot_simplify
+    | Yielding_int_like_compare_functions () -> Cannot_simplify
 
   let op_rhs_unknown (op : op) ~lhs : _ binary_arith_outcome_for_one_side_only =
     match op with
@@ -854,299 +880,65 @@ end = struct
       if F.is_any_nan lhs
       then result_of_comparison_with_nan op
       else Cannot_simplify
-    | Yielding_int_like_compare_functions -> Cannot_simplify
+    | Yielding_int_like_compare_functions () -> Cannot_simplify
 end
+
+module Float_ops_for_binary_comp = Float_ops_for_binary_comp_gen (struct
+  module F = Numeric_types.Float_by_bit_pattern
+
+  let arg_kind = K.Standard_int_or_float.Naked_float
+
+  let prover = T.meet_naked_floats
+end)
+
+module Float32_ops_for_binary_comp = Float_ops_for_binary_comp_gen (struct
+  module F = Numeric_types.Float32_by_bit_pattern
+
+  let arg_kind = K.Standard_int_or_float.Naked_float32
+
+  let prover = T.meet_naked_float32s
+end)
 
 module Binary_float_comp = Binary_arith_like (Float_ops_for_binary_comp)
+module Binary_float32_comp = Binary_arith_like (Float32_ops_for_binary_comp)
 
-module Int_ops_for_binary_eq_comp (I : A.Int_number_kind) : sig
-  include Binary_arith_like_sig with type op = P.equality_comparison
-end = struct
-  module Lhs = I.Num
-  module Rhs = I.Num
-  module Result = Targetint_31_63
-
-  type op = P.equality_comparison
-
-  let arg_kind = I.standard_int_or_float_kind
-
-  let result_kind = K.naked_immediate
-
-  let ok_to_evaluate _env = true
-
-  let prover_lhs = I.unboxed_prover
-
-  let prover_rhs = I.unboxed_prover
-
-  let unknown _ = T.any_naked_immediate
-
-  let these = T.these_naked_immediates
-
-  let term imm : Named.t =
-    Named.create_simple (Simple.const (Reg_width_const.naked_immediate imm))
-
-  module Pair = I.Num.Pair
-
-  let cross_product = I.Num.cross_product
-
-  module Num = I.Num
-
-  let op (op : P.equality_comparison) n1 n2 =
-    let bool b = Targetint_31_63.bool b in
-    match op with
-    | Eq -> Some (bool (Num.compare n1 n2 = 0))
-    | Neq -> Some (bool (Num.compare n1 n2 <> 0))
-
-  let op_lhs_unknown _op ~rhs:_ = Cannot_simplify
-
-  let op_rhs_unknown _op ~lhs:_ = Cannot_simplify
-end
-[@@inline always]
-
-module Int_ops_for_binary_eq_comp_tagged_immediate =
-  Int_ops_for_binary_eq_comp (A.For_tagged_immediates)
-module Int_ops_for_binary_eq_comp_naked_immediate =
-  Int_ops_for_binary_eq_comp (A.For_naked_immediates)
-module Int_ops_for_binary_eq_comp_int32 =
-  Int_ops_for_binary_eq_comp (A.For_int32s)
-module Int_ops_for_binary_eq_comp_int64 =
-  Int_ops_for_binary_eq_comp (A.For_int64s)
-module Int_ops_for_binary_eq_comp_nativeint =
-  Int_ops_for_binary_eq_comp (A.For_nativeints)
-module Binary_int_eq_comp_tagged_immediate =
-  Binary_arith_like (Int_ops_for_binary_eq_comp_tagged_immediate)
-module Binary_int_eq_comp_naked_immediate =
-  Binary_arith_like (Int_ops_for_binary_eq_comp_naked_immediate)
-module Binary_int_eq_comp_int32 =
-  Binary_arith_like (Int_ops_for_binary_eq_comp_int32)
-module Binary_int_eq_comp_int64 =
-  Binary_arith_like (Int_ops_for_binary_eq_comp_int64)
-module Binary_int_eq_comp_nativeint =
-  Binary_arith_like (Int_ops_for_binary_eq_comp_nativeint)
-
-(* General notes about symbol projections (also applicable to [Project_var]):
-
-   Projections from symbols bound to variables are important to remember, since
-   if such a variable occurs in a set of closures environment or other value
-   that can potentially be lifted, the knowledge that the variable is equal to a
-   symbol projection can make the difference between being able to lift and not
-   being able to lift. We try to avoid recording symbol projections whose answer
-   is known (in particular the answer is a symbol or a constant), since such
-   symbol projection knowledge doesn't affect lifting decisions.
-
-   We only need to record a projection if the defining expression remains as a
-   [Prim]. In particular if the defining expression simplified to a variable
-   (via the [Simple] constructor), then in the event that the variable is itself
-   a symbol projection, the environment will already know this fact.
-
-   We don't need to record a projection if we are currently at toplevel, since
-   any variable involved in a constant to be lifted from that position will also
-   be at toplevel. *)
-let record_any_symbol_projection_for_block_load dacc ~result_var ~block ~index =
-  let module SP = Symbol_projection in
-  if DE.at_unit_toplevel (DA.denv dacc)
-  then dacc
-  else
-    (* The [args] being queried here are the post-simplification arguments of
-       the primitive, so we can directly read off whether they are symbols or
-       constants, as needed. *)
-    Simple.pattern_match index
-      ~const:(fun const ->
-        match Reg_width_const.descr const with
-        | Tagged_immediate imm ->
-          Simple.pattern_match' block
-            ~const:(fun _ -> dacc)
-            ~symbol:(fun symbol_projected_from ~coercion:_ ->
-              let index = Targetint_31_63.to_targetint imm in
-              let proj =
-                SP.create symbol_projected_from
-                  (SP.Projection.block_load ~index)
-              in
-              let var = Bound_var.var result_var in
-              DA.map_denv dacc ~f:(fun denv ->
-                  DE.add_symbol_projection denv var proj))
-            ~var:(fun _ ~coercion:_ -> dacc)
-        | Naked_immediate _ | Naked_float _ | Naked_int32 _ | Naked_int64 _
-        | Naked_nativeint _ ->
-          Misc.fatal_errorf "Kind error for [Block_load] of %a at index %a"
-            Simple.print block Simple.print index)
-      ~name:(fun _ ~coercion:_ -> dacc)
-
-let[@inline always] simplify_immutable_block_load0
-    (access_kind : P.Block_access_kind.t) ~min_name_mode dacc ~original_term
-    _dbg ~arg1:_ ~arg1_ty:block_ty ~arg2:_ ~arg2_ty:index_ty ~result_var =
-  let result_kind =
-    match access_kind with
-    | Values _ -> K.value
-    | Naked_floats _ -> K.naked_float
-  in
-  let result_var' = Bound_var.var result_var in
-  let[@inline always] unchanged () =
-    let ty = T.unknown result_kind in
-    let dacc = DA.add_variable dacc result_var ty in
-    Simplified_named.reachable original_term ~try_reify:false, dacc
-  in
-  let[@inline always] invalid () =
-    let ty = T.bottom result_kind in
-    let dacc = DA.add_variable dacc result_var ty in
-    Simplified_named.invalid (), dacc
-  in
-  let exactly simple =
-    let dacc =
-      DA.add_variable dacc result_var (T.alias_type_of result_kind simple)
-    in
-    let named = Named.create_simple simple in
-    Simplified_named.reachable named ~try_reify:false, dacc
-  in
+let simplify_phys_equal (op : P.equality_comparison) dacc ~original_term _dbg
+    ~arg1:_ ~arg1_ty ~arg2:_ ~arg2_ty ~result_var =
+  (* This primitive is only used for arguments of kind [Value]. *)
   let typing_env = DA.typing_env dacc in
-  match T.prove_equals_single_tagged_immediate typing_env index_ty with
-  | Invalid -> invalid ()
-  | Unknown -> unchanged ()
-  | Proved index -> (
-    let skip_simplification =
-      let size =
-        match access_kind with
-        | Values { size; _ } | Naked_floats { size } -> size
-      in
-      match size with
-      | Unknown -> false
-      | Known size -> (
-        match Flambda_features.Expert.max_block_size_for_projections () with
-        | None -> false
-        | Some max_size ->
-          let max_size = Targetint_31_63.Imm.of_int max_size in
-          not (Targetint_31_63.Imm.( <= ) size max_size))
-    in
-    match
-      T.prove_block_field_simple typing_env ~min_name_mode block_ty index
-    with
-    | Invalid -> invalid ()
-    | Proved simple -> exactly simple
-    | Unknown when skip_simplification -> unchanged ()
-    | Unknown ->
-      let n =
-        Targetint_31_63.Imm.add
-          (Targetint_31_63.to_targetint index)
-          Targetint_31_63.Imm.one
-      in
-      (* CR-someday mshinwell: We should be able to use the size in the
-         [access_kind] to constrain the type of the block *)
-      let tag : _ Or_unknown.t =
-        match access_kind with
-        | Values { tag; _ } -> Or_unknown.map tag ~f:Tag.Scannable.to_tag
-        | Naked_floats { size } -> (
-          match size with
-          | Known size ->
-            (* We don't expect blocks of naked floats of size zero (it doesn't
-               seem that the frontend currently emits code to create such
-               blocks) and so it isn't clear whether such blocks should have tag
-               zero (like zero-sized naked float arrays) or another tag. *)
-            if Targetint_31_63.Imm.equal size Targetint_31_63.Imm.zero
-            then Unknown
-            else Known Tag.double_array_tag
-          | Unknown -> Unknown)
-      in
-      Simplify_common.simplify_projection dacc ~original_term
-        ~deconstructing:block_ty
-        ~shape:
-          (T.immutable_block_with_size_at_least ~tag ~n ~field_kind:result_kind
-             ~field_n_minus_one:result_var')
-        ~result_var ~result_kind)
-
-let simplify_immutable_block_load access_kind ~min_name_mode dacc ~original_term
-    dbg ~arg1 ~arg1_ty ~arg2 ~arg2_ty ~result_var =
-  let ((reachable, dacc) as reachable_and_dacc) =
-    simplify_immutable_block_load0 access_kind ~min_name_mode dacc
-      ~original_term dbg ~arg1 ~arg1_ty ~arg2 ~arg2_ty ~result_var
-  in
-  let dacc' =
-    record_any_symbol_projection_for_block_load dacc ~result_var ~block:arg1
-      ~index:arg2
-  in
-  if dacc == dacc' then reachable_and_dacc else reachable, dacc'
-
-let simplify_phys_equal (op : P.equality_comparison) (kind : K.t) dacc
-    ~original_term dbg ~arg1 ~arg1_ty ~arg2 ~arg2_ty ~result_var =
-  let const bool =
+  (* Note: We don't compare the arguments themselves for equality. Instead, we
+     know that [simplify_simple] always returns alias types, so we let the
+     prover do the matching. *)
+  match T.prove_physical_equality typing_env arg1_ty arg2_ty with
+  | Proved bool ->
+    let result = match op with Eq -> bool | Neq -> not bool in
     let dacc =
       DA.add_variable dacc result_var
-        (T.this_naked_immediate (Targetint_31_63.bool bool))
+        (T.this_naked_immediate (Targetint_31_63.bool result))
     in
-    ( Simplified_named.reachable
-        (Named.create_simple (Simple.const_bool bool))
-        ~try_reify:false,
-      dacc )
-  in
-  if Simple.equal arg1 arg2
-  then match op with Eq -> const true | Neq -> const false
-  else
-    match kind with
-    | Value -> (
-      let typing_env = DA.typing_env dacc in
-      let proof1 = T.prove_equals_tagged_immediates typing_env arg1_ty in
-      let proof2 = T.prove_equals_tagged_immediates typing_env arg2_ty in
-      match proof1, proof2 with
-      | Proved _, Proved _ ->
-        Binary_int_eq_comp_tagged_immediate.simplify op dacc ~original_term dbg
-          ~arg1 ~arg1_ty ~arg2 ~arg2_ty ~result_var
-      | _, _ -> (
-        let physically_equal =
-          false
-          (* CR-someday mshinwell: Resurrect this -- see cps_types branch.
-             T.values_physically_equal arg1_ty arg2_ty *)
-        in
-        let physically_distinct =
-          false
-          (* CR-someday mshinwell: Resurrect this -- see cps_types branch. (*
-             Structural inequality implies physical inequality. *) let env =
-             E.get_typing_environment env in T.values_structurally_distinct
-             (env, arg1_ty) (env, arg2_ty) *)
-        in
-        match op, physically_equal, physically_distinct with
-        (* | Eq, true, _ -> const true | Neq, true, _ -> const false | Eq, _,
-           true -> const false | Neq, _, true -> const true *)
-        | _, _, _ ->
-          let dacc =
-            DA.add_variable dacc result_var
-              (T.these_naked_immediates Targetint_31_63.all_bools)
-          in
-          Simplified_named.reachable original_term ~try_reify:false, dacc))
-    | Naked_number Naked_immediate -> (
-      let typing_env = DA.typing_env dacc in
-      let proof1 = T.prove_naked_immediates typing_env arg1_ty in
-      let proof2 = T.prove_naked_immediates typing_env arg2_ty in
-      match proof1, proof2 with
-      | Proved _, Proved _ ->
-        Binary_int_eq_comp_naked_immediate.simplify op dacc ~original_term dbg
-          ~arg1 ~arg1_ty ~arg2 ~arg2_ty ~result_var
-      | _, _ ->
-        let dacc =
-          DA.add_variable dacc result_var
-            (T.these_naked_immediates Targetint_31_63.all_bools)
-        in
-        Simplified_named.reachable original_term ~try_reify:false, dacc)
-    | Naked_number Naked_float ->
-      (* CR mshinwell: Should this case be statically disallowed in the type, to
-         force people to use [Float_comp]? *)
-      let op : P.comparison = match op with Eq -> Eq | Neq -> Neq in
-      Binary_float_comp.simplify (Yielding_bool op) dacc ~original_term dbg
-        ~arg1 ~arg1_ty ~arg2 ~arg2_ty ~result_var
-    | Naked_number Naked_int32 ->
-      Binary_int_eq_comp_int32.simplify op dacc ~original_term dbg ~arg1
-        ~arg1_ty ~arg2 ~arg2_ty ~result_var
-    | Naked_number Naked_int64 ->
-      Binary_int_eq_comp_int64.simplify op dacc ~original_term dbg ~arg1
-        ~arg1_ty ~arg2 ~arg2_ty ~result_var
-    | Naked_number Naked_nativeint ->
-      Binary_int_eq_comp_nativeint.simplify op dacc ~original_term dbg ~arg1
-        ~arg1_ty ~arg2 ~arg2_ty ~result_var
-    | Fabricated -> Misc.fatal_error "Fabricated kind not expected here"
-    | Rec_info -> Misc.fatal_error "Rec_info kind not expected here"
+    SPR.create
+      (Named.create_simple (Simple.untagged_const_bool result))
+      ~try_reify:false dacc
+  | Unknown ->
+    let dacc =
+      DA.add_variable dacc result_var
+        (T.these_naked_immediates Targetint_31_63.all_bools)
+    in
+    SPR.create original_term ~try_reify:false dacc
 
-let simplify_array_load (array_kind : P.Array_kind.t) mutability dacc
-    ~original_term:_ dbg ~arg1 ~arg1_ty:array_ty ~arg2 ~arg2_ty:_ ~result_var =
+let simplify_array_load (array_kind : P.Array_kind.t)
+    (array_load_kind : P.Array_load_kind.t) mutability dacc ~original_term:_ dbg
+    ~arg1:array ~arg1_ty:array_ty ~arg2:index ~arg2_ty:index_ty ~result_var =
   let result_kind =
-    P.Array_kind.element_kind array_kind |> K.With_subkind.kind
+    match array_load_kind with
+    | Immediates -> (* CR mshinwell: use the subkind *) K.value
+    | Values -> K.value
+    | Naked_floats -> K.naked_float
+    | Naked_float32s -> K.naked_float32
+    | Naked_int32s -> K.naked_int32
+    | Naked_int64s -> K.naked_int64
+    | Naked_nativeints -> K.naked_nativeint
+    | Naked_vec128s -> K.naked_vec128
   in
   let array_kind =
     Simplify_common.specialise_array_kind dacc array_kind ~array_ty
@@ -1156,82 +948,210 @@ let simplify_array_load (array_kind : P.Array_kind.t) mutability dacc
   | Bottom ->
     let ty = T.bottom result_kind in
     let dacc = DA.add_variable dacc result_var ty in
-    Simplified_named.invalid (), dacc
-  | Ok array_kind ->
-    let result_kind' =
-      P.Array_kind.element_kind array_kind |> K.With_subkind.kind
+    SPR.create_invalid dacc
+  | Ok array_kind -> (
+    let prim : P.t =
+      Binary (Array_load (array_kind, array_load_kind, mutability), array, index)
     in
-    assert (K.equal result_kind result_kind');
-    let prim : P.t = Binary (Array_load (array_kind, mutability), arg1, arg2) in
-    let named = Named.create_prim prim dbg in
-    let ty = T.unknown (P.result_kind' prim) in
-    let dacc = DA.add_variable dacc result_var ty in
-    Simplified_named.reachable named ~try_reify:false, dacc
+    let[@inline] return_given_type ty ~try_reify =
+      let named = Named.create_prim prim dbg in
+      let dacc = DA.add_variable dacc result_var ty in
+      SPR.create named ~try_reify dacc
+    in
+    let[@inline] contents_unknown () =
+      return_given_type (T.unknown (P.result_kind' prim)) ~try_reify:false
+    in
+    (* CR mshinwell/vlaviron: if immutable array accesses were consistently
+       setting [mutability] to [Immutable], we could restrict the following code
+       to immutable loads only and use [T.meet_is_immutable_array] instead. *)
+    match T.prove_is_immutable_array (DA.typing_env dacc) array_ty with
+    | Unknown -> contents_unknown ()
+    | Proved (elt_kind, fields, _mode) -> (
+      match elt_kind with
+      | Unknown | Bottom -> contents_unknown ()
+      | Ok elt_kind -> (
+        if not (K.equal (K.With_subkind.kind elt_kind) result_kind)
+        then contents_unknown ()
+        else
+          match
+            T.prove_equals_tagged_immediates (DA.typing_env dacc) index_ty
+          with
+          | Unknown -> contents_unknown ()
+          | Proved imms -> (
+            match Targetint_31_63.Set.get_singleton imms with
+            | None -> contents_unknown ()
+            | Some imm ->
+              if Targetint_31_63.( < ) imm Targetint_31_63.zero
+                 || Targetint_31_63.( >= ) imm
+                      (Array.length fields |> Targetint_31_63.of_int)
+              then SPR.create_invalid dacc
+              else
+                return_given_type
+                  fields.(Targetint_31_63.to_int imm)
+                  ~try_reify:true))))
 
-let simplify_binary_primitive dacc original_prim (prim : P.binary_primitive)
+let simplify_string_or_bigstring_load _string_like_value _string_accessor_width
+    ~original_prim dacc ~original_term _dbg ~arg1:_ ~arg1_ty:_ ~arg2:_
+    ~arg2_ty:_ ~result_var =
+  (* CR mshinwell: This could evaluate loads from known strings. *)
+  SPR.create_unknown dacc ~result_var
+    (P.result_kind' original_prim)
+    ~original_term
+
+let simplify_bigarray_load _num_dimensions _bigarray_kind _bigarray_layout
+    ~original_prim dacc ~original_term _dbg ~arg1:_ ~arg1_ty:_ ~arg2:_
+    ~arg2_ty:_ ~result_var =
+  SPR.create_unknown dacc ~result_var
+    (P.result_kind' original_prim)
+    ~original_term
+
+let simplify_bigarray_get_alignment _align ~original_prim dacc ~original_term
+    _dbg ~arg1:_ ~arg1_ty:_ ~arg2:_ ~arg2_ty:_ ~result_var =
+  SPR.create_unknown dacc ~result_var
+    (P.result_kind' original_prim)
+    ~original_term
+
+let simplify_atomic_exchange ~original_prim dacc ~original_term _dbg ~arg1:_
+    ~arg1_ty:_ ~arg2:_ ~arg2_ty:_ ~result_var =
+  SPR.create_unknown dacc ~result_var
+    (P.result_kind' original_prim)
+    ~original_term
+
+let simplify_atomic_fetch_and_add ~original_prim dacc ~original_term _dbg
+    ~arg1:_ ~arg1_ty:_ ~arg2:_ ~arg2_ty:_ ~result_var =
+  SPR.create_unknown dacc ~result_var
+    (P.result_kind' original_prim)
+    ~original_term
+
+let simplify_block_set _block_access_kind _init_or_assign ~field:_ dacc
+    ~original_term _dbg ~arg1:_ ~arg1_ty:_ ~arg2:_ ~arg2_ty:_ ~result_var =
+  SPR.create_unit dacc ~result_var ~original_term
+
+let simplify_binary_primitive0 dacc original_prim (prim : P.binary_primitive)
     ~arg1 ~arg1_ty ~arg2 ~arg2_ty dbg ~result_var =
-  let min_name_mode = Bound_var.name_mode result_var in
   let original_term = Named.create_prim original_prim dbg in
   let simplifier =
     match prim with
-    | Block_load (access_kind, Immutable) ->
-      simplify_immutable_block_load access_kind ~min_name_mode
-    | Array_load (array_kind, mutability) ->
-      simplify_array_load array_kind mutability
-    | Int_arith (kind, op) -> begin
+    | Block_set { kind; init; field } -> simplify_block_set kind init ~field
+    | Array_load (array_kind, width, mutability) ->
+      simplify_array_load array_kind width mutability
+    | Int_arith (kind, op) -> (
       match kind with
       | Tagged_immediate -> Binary_int_arith_tagged_immediate.simplify op
       | Naked_immediate -> Binary_int_arith_naked_immediate.simplify op
       | Naked_int32 -> Binary_int_arith_int32.simplify op
       | Naked_int64 -> Binary_int_arith_int64.simplify op
-      | Naked_nativeint -> Binary_int_arith_nativeint.simplify op
-    end
-    | Int_shift (kind, op) -> begin
+      | Naked_nativeint -> Binary_int_arith_nativeint.simplify op)
+    | Int_shift (kind, op) -> (
       match kind with
       | Tagged_immediate -> Binary_int_shift_tagged_immediate.simplify op
       | Naked_immediate -> Binary_int_shift_naked_immediate.simplify op
       | Naked_int32 -> Binary_int_shift_int32.simplify op
       | Naked_int64 -> Binary_int_shift_int64.simplify op
-      | Naked_nativeint -> Binary_int_shift_nativeint.simplify op
-    end
-    | Int_comp (kind, Signed, op) -> begin
+      | Naked_nativeint -> Binary_int_shift_nativeint.simplify op)
+    | Int_comp (kind, op) -> (
       match kind with
       | Tagged_immediate -> Binary_int_comp_tagged_immediate.simplify op
       | Naked_immediate -> Binary_int_comp_naked_immediate.simplify op
       | Naked_int32 -> Binary_int_comp_int32.simplify op
       | Naked_int64 -> Binary_int_comp_int64.simplify op
-      | Naked_nativeint -> Binary_int_comp_nativeint.simplify op
-    end
-    | Int_comp (kind, Unsigned, op) -> begin
-      match kind with
-      | Tagged_immediate ->
-        Binary_int_comp_unsigned_tagged_immediate.simplify op
-      | Naked_immediate -> Binary_int_comp_unsigned_naked_immediate.simplify op
-      | Naked_int32 -> Binary_int_comp_unsigned_int32.simplify op
-      | Naked_int64 -> Binary_int_comp_unsigned_int64.simplify op
-      | Naked_nativeint -> Binary_int_comp_unsigned_nativeint.simplify op
-    end
-    | Float_arith op -> Binary_float_arith.simplify op
-    | Float_comp op -> Binary_float_comp.simplify op
-    | Phys_equal (kind, op) -> simplify_phys_equal op kind
-    | Block_load _ ->
-      fun dacc ~original_term:_ dbg ~arg1 ~arg1_ty:_ ~arg2 ~arg2_ty:_
-          ~result_var ->
-        let prim : P.t = Binary (prim, arg1, arg2) in
-        let named = Named.create_prim prim dbg in
-        let ty = T.unknown (P.result_kind' prim) in
-        let dacc = DA.add_variable dacc result_var ty in
-        Simplified_named.reachable named ~try_reify:false, dacc
-    | String_or_bigstring_load _ | Bigarray_load _ ->
-      fun dacc ~original_term:_ dbg ~arg1 ~arg1_ty:_ ~arg2 ~arg2_ty:_
-          ~result_var ->
-        let prim : P.t = Binary (prim, arg1, arg2) in
-        let named = Named.create_prim prim dbg in
-        let ty = T.unknown (P.result_kind' prim) in
-        let dacc = DA.add_variable dacc result_var ty in
-        Simplified_named.reachable named ~try_reify:false, dacc
+      | Naked_nativeint -> Binary_int_comp_nativeint.simplify op)
+    | Float_arith (Float64, op) -> Binary_float_arith.simplify op
+    | Float_comp (Float64, op) -> Binary_float_comp.simplify op
+    (* Note: despite the fact that all float32s are representable as float64s,
+       float32 arithmetic operations need to be performed in 32-bit precision to
+       preserve rounding behavior. Such 32-bit operations are implemented by
+       flambda2_floats. *)
+    | Float_arith (Float32, op) -> Binary_float32_arith.simplify op
+    | Float_comp (Float32, op) -> Binary_float32_comp.simplify op
+    | Phys_equal op -> simplify_phys_equal op
+    | String_or_bigstring_load (string_like_value, string_accessor_width) ->
+      simplify_string_or_bigstring_load string_like_value string_accessor_width
+        ~original_prim
+    | Bigarray_load (num_dimensions, bigarray_kind, bigarray_layout) ->
+      simplify_bigarray_load num_dimensions bigarray_kind bigarray_layout
+        ~original_prim
+    | Bigarray_get_alignment align ->
+      simplify_bigarray_get_alignment align ~original_prim
+    | Atomic_exchange -> simplify_atomic_exchange ~original_prim
+    | Atomic_fetch_and_add -> simplify_atomic_fetch_and_add ~original_prim
   in
-  let reachable, dacc =
-    simplifier dacc ~original_term dbg ~arg1 ~arg1_ty ~arg2 ~arg2_ty ~result_var
+  simplifier dacc ~original_term dbg ~arg1 ~arg1_ty ~arg2 ~arg2_ty ~result_var
+
+let recover_comparison_primitive dacc (prim : P.binary_primitive) ~arg1 ~arg2 =
+  match prim with
+  | Block_set _ | Array_load _ | Int_arith _ | Int_shift _
+  | Int_comp (_, Yielding_int_like_compare_functions _)
+  | Float_arith _ | Float_comp _ | Phys_equal _ | String_or_bigstring_load _
+  | Bigarray_load _ | Bigarray_get_alignment _ | Atomic_exchange
+  | Atomic_fetch_and_add ->
+    None
+  | Int_comp (kind, Yielding_bool op) -> (
+    match kind with
+    | Naked_immediate | Naked_int32 | Naked_int64 | Naked_nativeint -> None
+    | Tagged_immediate -> (
+      let try_one_direction left right op =
+        Simple.pattern_match right
+          ~name:(fun _ ~coercion:_ -> None)
+          ~const:(fun const ->
+            match[@warning "-fragile-match"] Const.descr const with
+            | Tagged_immediate i when Targetint_31_63.(equal i zero) ->
+              Simple.pattern_match' left
+                ~const:(fun _ -> None)
+                ~symbol:(fun _ ~coercion:_ -> None)
+                ~var:(fun var ~coercion:_ ->
+                  match DE.find_comparison_result (DA.denv dacc) var with
+                  | None -> None
+                  | Some comp ->
+                    Some
+                      (Comparison_result.convert_result_compared_to_tagged_zero
+                         comp op))
+            | _ -> None)
+      in
+      match try_one_direction arg1 arg2 op with
+      | Some p -> Some p
+      | None ->
+        let op : _ P.comparison =
+          match op with
+          | Eq -> Eq
+          | Neq -> Neq
+          (* Note that this is not handling a negation of an inequality, it is
+             simply a pattern match for when the inequality appears the other
+             way around. So e.g. [Lt] maps to [Gt], not [Ge]. *)
+          | Lt s -> Gt s
+          | Gt s -> Lt s
+          | Le s -> Ge s
+          | Ge s -> Le s
+        in
+        try_one_direction arg2 arg1 op))
+
+let simplify_binary_primitive dacc original_prim (prim : P.binary_primitive)
+    ~arg1 ~arg1_ty ~arg2 ~arg2_ty dbg ~result_var =
+  let original_prim, prim, arg1, arg1_ty, arg2, arg2_ty =
+    match[@warning "-fragile-match"]
+      recover_comparison_primitive dacc prim ~arg1 ~arg2
+    with
+    | None -> original_prim, prim, arg1, arg1_ty, arg2, arg2_ty
+    | Some (Binary (new_prim, new_arg1, new_arg2) as new_original_prim) -> (
+      let min_name_mode = Bound_var.name_mode result_var in
+      let arg1_ty_opt =
+        S.simplify_simple_if_in_scope dacc new_arg1 ~min_name_mode
+      in
+      let arg2_ty_opt =
+        S.simplify_simple_if_in_scope dacc new_arg2 ~min_name_mode
+      in
+      match arg1_ty_opt, arg2_ty_opt with
+      | Some new_arg1_ty, Some new_arg2_ty ->
+        ( new_original_prim,
+          new_prim,
+          new_arg1,
+          new_arg1_ty,
+          new_arg2,
+          new_arg2_ty )
+      | None, _ | _, None -> original_prim, prim, arg1, arg1_ty, arg2, arg2_ty)
+    | Some other_prim ->
+      Misc.fatal_errorf "Recovered primitive %a is not a comparison"
+        Flambda_primitive.print other_prim
   in
-  reachable, dacc
+  simplify_binary_primitive0 dacc original_prim prim ~arg1 ~arg1_ty ~arg2
+    ~arg2_ty dbg ~result_var

@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 (** Cost metrics are a group of metrics tracking the impact of simplifying an
     expression. One of these is an approximation of the size of the generated
     machine code for this expression. It also tracks the number of operations
@@ -34,6 +32,8 @@ type code_characteristics =
 let zero = { size = Code_size.zero; removed = Removed_operations.zero }
 
 let size t = t.size
+
+let removed t = t.removed
 
 let print ppf t =
   Format.fprintf ppf "@[<hov 1>size: %a removed: {%a}@]" Code_size.print t.size
@@ -59,25 +59,29 @@ let ( + ) a b =
 (*
  * A set of closures introduces implicitly an alloc whose size (as in OCaml 4.11)
  * is:
- *   total number of closure variables + sum of s(arity) for each closure
+ *   total number of value slots + sum of s(arity) for each closure
  * where s(a) = if a = 1 then 2 else 3
  *)
 let set_of_closures ~find_code_characteristics set_of_closures =
   let func_decls = Set_of_closures.function_decls set_of_closures in
   let funs = Function_declarations.funs func_decls in
   let num_clos_vars =
-    Set_of_closures.closure_elements set_of_closures
-    |> Var_within_closure.Map.cardinal
+    Set_of_closures.value_slots set_of_closures |> Value_slot.Map.cardinal
   in
   let cost_metrics, num_words =
-    Closure_id.Map.fold
-      (fun _ code_id (metrics, num_words) ->
-        let { cost_metrics; params_arity } =
-          find_code_characteristics code_id
-        in
-        ( metrics + cost_metrics,
-          (* CR poechsel: valid until OCaml 4.13, as for named_size *)
-          Stdlib.( + ) num_words (if params_arity <= 1 then 2 else 3) ))
+    Function_slot.Map.fold
+      (fun _ (code_id : Function_declarations.code_id_in_function_declaration)
+           (metrics, num_words) ->
+        match code_id with
+        | Deleted { function_slot_size; _ } ->
+          metrics, Stdlib.( + ) num_words function_slot_size
+        | Code_id code_id ->
+          let { cost_metrics; params_arity } =
+            find_code_characteristics code_id
+          in
+          ( metrics + cost_metrics,
+            (* CR poechsel: valid until OCaml 4.12, as for named_size *)
+            Stdlib.( + ) num_words (if params_arity <= 1 then 2 else 3) ))
       funs (zero, num_clos_vars)
   in
   let alloc_size =

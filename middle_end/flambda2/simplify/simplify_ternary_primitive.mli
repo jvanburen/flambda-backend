@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 (** Simplification of primitives taking three arguments. *)
 
 val simplify_ternary_primitive :
@@ -30,4 +28,4 @@ val simplify_ternary_primitive :
   arg3_ty:Flambda2_types.t ->
   Debuginfo.t ->
   result_var:Bound_var.t ->
-  Simplified_named.t * Downwards_acc.t
+  Simplify_primitive_result.t

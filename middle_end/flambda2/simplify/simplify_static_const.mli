@@ -16,13 +16,11 @@
 
 (** Simplification of statically-allocated constants bound to symbols. *)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 open! Flambda
 
 val simplify_static_consts :
   Downwards_acc.t ->
-  Bound_symbols.t ->
+  Bound_static.t ->
   Static_const_group.t ->
-  simplify_toplevel:Simplify_common.simplify_toplevel ->
-  Bound_symbols.t * Rebuilt_static_const.Group.t * Downwards_acc.t
+  simplify_function_body:Simplify_common.simplify_function_body ->
+  Bound_static.t * Rebuilt_static_const.Group.t * Downwards_acc.t

@@ -17,10 +17,8 @@
 (** A value that is known to fit into a register (of the appropriate kind) on
     the target machine. We do not require such values to be [Let]-bound. *)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 include module type of struct
-  include Reg_width_things.Simple
+  include Int_ids.Simple
 end
 
 include Contains_names.S with type t := t
@@ -40,12 +38,13 @@ val must_be_symbol : t -> (Symbol.t * Coercion.t) option
 val must_be_name : t -> (Name.t * Coercion.t) option
 
 (** The constant representating the given number of type "int". *)
-val const_int : Targetint_31_63.Imm.t -> t
+val const_int : Targetint_31_63.t -> t
 
 (** The constant representating the given boolean value. *)
 val const_bool : bool -> t
 
-(* CR mshinwell: fix naming *)
+(** The naked immediate constant representating the given boolean value. *)
+val untagged_const_bool : bool -> t
 
 (** The constant representating boolean true. *)
 val const_true : t
@@ -62,7 +61,7 @@ val const_zero : t
 
 val untagged_const_zero : t
 
-val untagged_const_int : Targetint_31_63.Imm.t -> t
+val untagged_const_int : Targetint_31_63.t -> t
 
 val const_one : t
 
@@ -70,6 +69,8 @@ val const_one : t
 val const_unit : t
 
 val const_from_descr : Reg_width_const.Descr.t -> t
+
+val const_int_of_kind : Flambda_kind.t -> int -> t
 
 val is_const : t -> bool
 
@@ -100,6 +101,22 @@ module With_kind : sig
   type nonrec t = t * Flambda_kind.t
 
   include Contains_names.S with type t := t
+
+  include Container_types.S with type t := t
+end
+
+module With_debuginfo : sig
+  type nonrec t
+
+  val create : Int_ids.Simple.t -> Debuginfo.t -> t
+
+  val simple : t -> Int_ids.Simple.t
+
+  val dbg : t -> Debuginfo.t
+
+  include Contains_names.S with type t := t
+
+  include Contains_ids.S with type t := t
 
   include Container_types.S with type t := t
 end

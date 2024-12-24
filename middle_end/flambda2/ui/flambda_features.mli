@@ -12,11 +12,19 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 val flambda2_is_enabled : unit -> bool
 
+val debug_flambda2 : unit -> bool
+
+type 'a mode =
+  | Normal : [`Normal] mode
+  | Classic : [`Classic] mode
+
+type any_mode = Mode : _ mode -> any_mode
+
 val classic_mode : unit -> bool
+
+val mode : unit -> any_mode
 
 val join_points : unit -> bool
 
@@ -26,19 +34,21 @@ val backend_cse_at_toplevel : unit -> bool
 
 val cse_depth : unit -> int
 
-val safe_string : unit -> bool
+val join_depth : unit -> int
+
+val enable_reaper : unit -> bool
 
 val flat_float_array : unit -> bool
 
 val function_result_types : is_a_functor:bool -> bool
+
+val use_better_meet : unit -> bool
 
 val debug : unit -> bool
 
 val opaque : unit -> bool
 
 val float_const_prop : unit -> bool
-
-val treat_invalid_code_as_unreachable : unit -> bool
 
 val optimize_for_speed : unit -> bool
 
@@ -50,27 +60,44 @@ val colour : unit -> Misc.Color.setting option
 
 val unicode : unit -> bool
 
+(** Check all invariants (light and heavy). *)
 val check_invariants : unit -> bool
+
+val check_light_invariants : unit -> bool
+
+type dump_target = Flambda_backend_flags.Flambda2.Dump.target =
+  | Nowhere
+  | Main_dump_stream
+  | File of Misc.filepath
 
 val dump_rawflambda : unit -> bool
 
 val dump_flambda : unit -> bool
 
-val dump_rawfexpr : unit -> bool
+val dump_rawfexpr : unit -> dump_target
 
-val dump_fexpr : unit -> bool
+val dump_fexpr : unit -> dump_target
 
-val dump_flexpect : unit -> bool
+val dump_flexpect : unit -> dump_target
 
-val dump_closure_offsets : unit -> bool
+val dump_slot_offsets : unit -> bool
+
+val dump_flow : unit -> bool
+
+val dump_simplify : unit -> bool
+
+val dump_reaper : unit -> bool
 
 val freshen_when_printing : unit -> bool
 
 module Inlining : sig
   type round_or_default =
     | Round of int
-    | Default
+    | Default of Flambda_backend_flags.opt_level
 
+  val depth_scaling_factor : int
+
+  (** [max_depth] returns the user's value multipled by [depth_scaling_factor]. *)
   val max_depth : round_or_default -> int
 
   val max_rec_depth : round_or_default -> int
@@ -97,14 +124,12 @@ module Inlining : sig
 end
 
 module Debug : sig
-  val permute_every_name : unit -> bool
-
   val concrete_types_only_on_canonicals : unit -> bool
+
+  val keep_invalid_handlers : unit -> bool
 end
 
 module Expert : sig
-  val code_id_and_symbol_scoping_checks : unit -> bool
-
   val fallback_inlining_heuristic : unit -> bool
 
   val inline_effects_in_cmm : unit -> bool
@@ -116,4 +141,12 @@ module Expert : sig
   val max_unboxing_depth : unit -> int
 
   val can_inline_recursive_functions : unit -> bool
+
+  val max_function_simplify_run : unit -> int
+
+  val shorten_symbol_names : unit -> bool
+
+  val cont_lifting_budget : unit -> int
 end
+
+val stack_allocation_enabled : unit -> bool

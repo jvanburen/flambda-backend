@@ -28,6 +28,8 @@
 module C = Cfg
 module CL = Cfg_with_layout
 
+let debug = false
+
 let update_predecessor's_terminators (cfg : C.t) ~pred_block ~being_disconnected
     ~target_label =
   let replace_label l =
@@ -48,7 +50,9 @@ let disconnect cfg_with_layout label =
   let has_predecessors = not (Label.Set.is_empty block.predecessors) in
   let n = Label.Set.cardinal successors in
   let has_more_than_one_successor = n > 1 in
-  if !C.verbose then Printf.printf "Disconnect %d in %s\n" label cfg.fun_name;
+  if !C.verbose
+  then
+    Printf.printf "Disconnect %s in %s\n" (Label.to_string label) cfg.fun_name;
   if has_more_than_one_successor && has_predecessors
   then
     (* CR-someday xclerc: it feels like this condition is really tied to the
@@ -61,7 +65,7 @@ let disconnect cfg_with_layout label =
   Label.Set.iter
     (fun succ ->
       let succ_block = C.get_block_exn cfg succ in
-      assert (Label.Set.mem label succ_block.predecessors);
+      if debug then assert (Label.Set.mem label succ_block.predecessors);
       succ_block.predecessors
         <- Label.Set.union
              (Label.Set.remove label succ_block.predecessors)
@@ -70,7 +74,7 @@ let disconnect cfg_with_layout label =
   Label.Set.iter
     (fun succ ->
       let succ_block = C.get_block_exn cfg succ in
-      assert (Label.Set.mem label succ_block.predecessors);
+      if debug then assert (Label.Set.mem label succ_block.predecessors);
       succ_block.predecessors <- Label.Set.remove label succ_block.predecessors)
     (C.successor_labels ~normal:false ~exn:true block);
   (* Update predecessor blocks. *)
@@ -80,9 +84,16 @@ let disconnect cfg_with_layout label =
     Label.Set.iter
       (fun pred_label ->
         let pred_block = Label.Tbl.find cfg.blocks pred_label in
-        assert (not (Label.Set.mem label pred_block.exns));
+        if debug
+        then
+          Option.iter
+            (fun pred_block_exn ->
+              assert (not (Label.equal label pred_block_exn)))
+            pred_block.exn;
         update_predecessor's_terminators cfg ~pred_block
           ~being_disconnected:label ~target_label)
       block.predecessors
-  else assert (Label.Set.is_empty block.predecessors);
+  else if debug
+  then assert (Label.Set.is_empty block.predecessors)
+  else ();
   CL.remove_block cfg_with_layout label

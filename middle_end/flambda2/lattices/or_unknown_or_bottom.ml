@@ -14,18 +14,23 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 type 'a t =
   | Unknown
   | Ok of 'a
   | Bottom
 
-let [@ocamlformat "disable"] print f ppf t =
+let print f ppf t =
+  let colour = Flambda_colours.top_or_bottom_type in
   match t with
-  | Unknown -> Format.pp_print_string ppf "Unknown"
-  | Ok contents -> Format.fprintf ppf "@[(Ok %a)@]" f contents
-  | Bottom -> Format.pp_print_string ppf "Bottom"
+  | Unknown ->
+    if Flambda_features.unicode ()
+    then Format.fprintf ppf "%t@<1>\u{22a4}%t" colour Flambda_colours.pop
+    else Format.fprintf ppf "%tT%t" colour Flambda_colours.pop
+  | Bottom ->
+    if Flambda_features.unicode ()
+    then Format.fprintf ppf "%t@<1>\u{22a5}%t" colour Flambda_colours.pop
+    else Format.fprintf ppf "%t_|_%t" colour Flambda_colours.pop
+  | Ok contents -> Format.fprintf ppf "@[(%a)@]" f contents
 
 let equal eq_contents t1 t2 =
   match t1, t2 with
@@ -52,9 +57,6 @@ let map_sharing t ~f =
   | Ok contents ->
     let contents' = f contents in
     if contents == contents' then t else Ok contents'
-
-let of_or_unknown (unk : _ Or_unknown.t) : _ t =
-  match unk with Known contents -> Ok contents | Unknown -> Unknown
 
 module Let_syntax = struct
   let ( let<>* ) x f = bind x ~f

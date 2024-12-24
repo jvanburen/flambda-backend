@@ -25,7 +25,8 @@ val string_of_reg8h: reg8h -> string
 val string_of_reg16: reg64 -> string
 val string_of_reg32: reg64 -> string
 val string_of_reg64: reg64 -> string
-val string_of_registerf: registerf -> string
+val string_of_regf: regf -> string
+val string_of_substring_literal: int -> int -> string -> string
 val string_of_string_literal: string -> string
 val string_of_condition: condition -> string
 val string_of_float_condition: float_condition -> string
@@ -39,6 +40,8 @@ val buf_bytes_directive:
 
 
 (** Buffer of assembly code *)
+
+val create_asm_file: bool ref
 
 val emit: instruction -> unit
 val directive: asm_line -> unit
@@ -78,6 +81,9 @@ type system =
   | S_win64
   | S_linux
   | S_mingw64
+  | S_freebsd
+  | S_netbsd
+  | S_openbsd
 
   | S_unknown
 
@@ -88,7 +94,31 @@ val windows:bool
 (** Whether calls need to go via the PLT. *)
 val use_plt : bool
 
+module Section_name : sig
+  type t
+  val equal : t -> t -> bool
+  val hash : t -> int
+  val compare : t -> t -> int
+  val make : string list -> string option -> string list -> t
+  val of_string : string -> t
+  val to_string : t -> string
+  val flags : t -> string option
+  val alignment : t -> int64
+  val is_text_like : t -> bool
+  val is_data_like : t -> bool
+  val is_note_like : t -> bool
+
+  module Map : Map.S with type key = t
+  module Tbl : Hashtbl.S with type key = t
+end
+
 (** Support for plumbing a binary code emitter *)
 
-val internal_assembler : (asm_program -> string -> unit) option ref
-val register_internal_assembler: (asm_program -> string -> unit) -> unit
+val internal_assembler :
+  (delayed:(unit -> (Section_name.t * X86_ast.asm_program) list)
+    -> (Section_name.t * X86_ast.asm_program) list
+    -> string -> unit) option ref
+
+val register_internal_assembler :
+  (delayed:(unit -> (Section_name.t * X86_ast.asm_program) list)
+   -> (Section_name.t * X86_ast.asm_program) list -> string -> unit) -> unit

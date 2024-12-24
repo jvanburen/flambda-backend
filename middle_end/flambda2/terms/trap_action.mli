@@ -22,12 +22,17 @@
     normal continuation (since continuations used as exception handlers use a
     calling convention that may differ from normal). *)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
+module Raise_kind : sig
+  type t =
+    | Regular
+    | Reraise
+    | No_trace
 
-type raise_kind =
-  | Regular
-  | Reraise
-  | No_trace
+  val from_lambda : Lambda.raise_kind -> t
+
+  (** Providing [None] is the same as providing [Some No_trace]. *)
+  val option_to_lambda : t option -> Lambda.raise_kind
+end
 
 type t =
   | Push of { exn_handler : Continuation.t }
@@ -37,7 +42,7 @@ type t =
                 target continuation in the enclosing [Apply_cont_expr]. One
                 example is when a value is being returned from the end of the
                 non-exceptional block of a try...with. *)
-        raise_kind : raise_kind option
+        raise_kind : Raise_kind.t option
       }
 
 include Expr_std.S with type t := t
@@ -47,13 +52,13 @@ module Option : sig
 
   val print : Format.formatter -> t -> unit
 
-  val all_ids_for_export : t -> Ids_for_export.t
+  val ids_for_export : t -> Ids_for_export.t
 
   val apply_renaming : t -> Renaming.t -> t
 end
 
 val compare : t -> t -> int
 
-val all_ids_for_export : t -> Ids_for_export.t
+val ids_for_export : t -> Ids_for_export.t
 
 val apply_renaming : t -> Renaming.t -> t

@@ -17,12 +17,9 @@
 
 open Format
 
-val reg: formatter -> Reg.t -> unit
-val regs: formatter -> Reg.t array -> unit
-val regset: formatter -> Reg.Set.t -> unit
-val regsetaddr: formatter -> Reg.Set.t -> unit
+val operation': ?print_reg:(formatter -> Reg.t -> unit) -> Mach.operation -> Reg.t array -> formatter -> Reg.t array -> unit
 val operation: Mach.operation -> Reg.t array -> formatter -> Reg.t array -> unit
-val test: Mach.test -> formatter -> Reg.t array -> unit
+val test: Simple_operation.test -> formatter -> Reg.t array -> unit
 val instr: formatter -> Mach.instruction -> unit
 val fundecl: formatter -> Mach.fundecl -> unit
 val phase: string -> formatter -> Mach.fundecl -> unit

@@ -27,6 +27,8 @@ module type S = sig
 
   val fold : (key -> 'a -> 'b -> 'b) -> 'a t -> 'b -> 'b
 
+  val fold_left_map : ('a -> key -> 'b -> 'a * 'c) -> 'a -> 'b t -> 'a * 'c t
+
   val filter : (key -> 'a -> bool) -> 'a t -> 'a t
 
   val keys : _ t -> key list
@@ -76,7 +78,7 @@ module Make (T : Thing) : S with type key = T.t = struct
 
   let empty = []
 
-  let is_empty m = m = []
+  let is_empty m = match m with [] -> true | _ :: _ -> false
 
   let add k v m = (k, v) :: m
 
@@ -89,6 +91,13 @@ module Make (T : Thing) : S with type key = T.t = struct
   let iter f m = List.iter (fun (k, v) -> f k v) m
 
   let fold f m b = List.fold_left (fun b (k, v) -> f k v b) b m
+
+  let fold_left_map f a m =
+    List.fold_left_map
+      (fun a (k, v) ->
+        let a, c = f a k v in
+        a, (k, c))
+      a m
 
   let filter p m = List.filter (fun (k, v) -> p k v) m
 
@@ -120,16 +129,8 @@ module Make (T : Thing) : S with type key = T.t = struct
 
   let mapi f m = List.map (fun (k, v) -> k, f k v) m
 
-  let rec map_sharing f l0 =
-    match l0 with
-    | a :: l ->
-      let a' = f a in
-      let l' = map_sharing f l in
-      if a' == a && l' == l then l0 else a' :: l'
-    | [] -> []
-
   let map_sharing f m =
-    map_sharing
+    Misc.Stdlib.List.map_sharing
       (fun ((k, v) as pair) ->
         let v' = f v in
         if v' == v then pair else k, v')
@@ -146,9 +147,9 @@ module Make (T : Thing) : S with type key = T.t = struct
   let of_seq m = List.of_seq m
 
   let print_assoc print_key print_datum ppf l =
-    if l = []
-    then Format.fprintf ppf "{}"
-    else
+    match l with
+    | [] -> Format.fprintf ppf "{}"
+    | _ :: _ ->
       Format.fprintf ppf "@[<hov 1>{%a}@]"
         (Format.pp_print_list ~pp_sep:Format.pp_print_space
            (fun ppf (key, datum) ->

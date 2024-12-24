@@ -16,24 +16,13 @@
 
 (** Translate Lambda code to Cmm using Flambda 2. *)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 (** This function is not currently re-entrant. *)
 val lambda_to_cmm :
   ppf_dump:Format.formatter ->
   prefixname:string ->
-  filename:string ->
-  module_ident:Ident.t ->
-  module_block_size_in_words:int ->
-  module_initializer:Lambda.lambda ->
   keep_symbol_tables:bool ->
+  Lambda.program ->
   Cmm.phrase list
 
-val symbol_for_global :
-  ?comp_unit:Flambda2_identifiers.Compilation_unit.t ->
-  Ident.t ->
-  Flambda2_identifiers.Symbol.t
-
-val get_global_info :
-  Flambda2_identifiers.Compilation_unit.t ->
-  Flambda2_cmx.Flambda_cmx_format.t option
+val get_module_info :
+  Compilation_unit.t -> Flambda2_cmx.Flambda_cmx_format.t option

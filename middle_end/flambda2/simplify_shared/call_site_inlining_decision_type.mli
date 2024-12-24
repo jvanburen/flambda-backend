@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 (* CR-someday mshinwell: Maybe have two types, one giving the reasons why
    something can be inlined, and one giving the reasons why something cannot be
    inlined. *)
@@ -34,8 +32,9 @@ type t =
         threshold : float
       }
   | Attribute_always
-  | Attribute_unroll of int
-  | Definition_says_inline
+  | Begin_unrolling of int
+  | Continue_unrolling
+  | Definition_says_inline of { was_inline_always : bool }
   | Speculatively_inline of
       { cost_metrics : Cost_metrics.t;
         evaluated_to : float;
@@ -47,10 +46,10 @@ val print : Format.formatter -> t -> unit
 val report : Format.formatter -> t -> unit
 
 type can_inline = private
-  | Do_not_inline of
-      { warn_if_attribute_ignored : bool;
-        because_of_definition : bool
+  | Do_not_inline of { erase_attribute_if_ignored : bool }
+  | Inline of
+      { unroll_to : int option;
+        was_inline_always : bool
       }
-  | Inline of { unroll_to : int option }
 
 val can_inline : t -> can_inline

@@ -15,17 +15,27 @@
 (** Public state to store the mapping from elements of a closure to offset. *)
 type t
 
-type closure_info =
-  { offset : int;
-    size : int
-        (* Number of fields taken for the function:
+type words = int
 
-           2 fields (code pointer + arity) for function of arity one
+type function_slot_info =
+  | Dead_function_slot
+  | Live_function_slot of
+      { offset : words;
+        size : words
+            (* Number of fields taken for the function:
 
-           3 fields (caml_curry + arity + code pointer) otherwise *)
-  }
+               2 fields (code pointer + arity) for function of arity one
 
-type env_var_info = { offset : int }
+               3 fields (caml_curry + arity + code pointer) otherwise *)
+      }
+
+type value_slot_info =
+  | Dead_value_slot
+  | Live_value_slot of
+      { offset : words;
+        size : words;
+        is_scanned : bool
+      }
 
 (** The empty environment *)
 val empty : t
@@ -33,37 +43,36 @@ val empty : t
 (** Printing function for environment. *)
 val print : Format.formatter -> t -> unit
 
-(** Returns the offset computed for an environment variable, in terms of target
+(** Returns the offset computed for a value slot, in terms of target
     architecture words.
 
-    If [None] is returned, there is no closure in the program containing the
-    given closure variable. *)
-val env_var_offset : t -> Var_within_closure.t -> env_var_info option
+    If [None] is returned, there is no set of closures in the program containing
+    the given value slot. *)
+val value_slot_offset : t -> Value_slot.t -> value_slot_info option
 
-(** Returns the offset computed for a closure id, in terms of target
+(** Returns the offset computed for a function slot, in terms of target
     architecture words.
 
-    This points to the first field of the closure representation within the sets
-    of closures block. Notably, if the offset is not 0, an infix header should
-    be placed just before the returned offset.
+    This points to the first field of the representation of the function slot
+    within the Closure_tag block. Notably, if the offset is not 0, an infix
+    header must be placed just before the returned offset.
 
-    If [None] is returned, there is no closure in the program containing the
-    given closure ID. *)
-val closure_offset : t -> Closure_id.t -> closure_info option
+    If [None] is returned, there is no set of closures in the program containing
+    the given function slot. *)
+val function_slot_offset : t -> Function_slot.t -> function_slot_info option
 
-val add_closure_offset : t -> Closure_id.t -> closure_info -> t
+(** Record the assignment of the given offset to the given function slot *)
+val add_function_slot_offset : t -> Function_slot.t -> function_slot_info -> t
 
-(** Record the assignment of the given offset to the given element *)
-val add_env_var_offset : t -> Var_within_closure.t -> env_var_info -> t
+(** Record the assignment of the given offset to the given value slot *)
+val add_value_slot_offset : t -> Value_slot.t -> value_slot_info -> t
 
-val map_closure_offsets :
-  t -> (Closure_id.t -> closure_info -> 'a) -> 'a Closure_id.Map.t
+val map_function_slot_offsets :
+  t -> (Function_slot.t -> function_slot_info -> 'a) -> 'a Function_slot.Map.t
 
 (** Build maps from the underlying data *)
-val map_env_var_offsets :
-  t ->
-  (Var_within_closure.t -> env_var_info -> 'a) ->
-  'a Var_within_closure.Map.t
+val map_value_slot_offsets :
+  t -> (Value_slot.t -> value_slot_info -> 'a) -> 'a Value_slot.Map.t
 
 (** Take the offsets read from a cmx file and add them to the current state *)
 val import_offsets : t -> unit
@@ -73,3 +82,11 @@ val imported_offsets : unit -> t
 
 (** Merge the offsets from two files *)
 val merge : t -> t -> t
+
+(** Ensure the offsets for the given function slots are in the given exported
+    offsets. *)
+val reexport_function_slots : Function_slot.Set.t -> t -> t
+
+(** Ensure the offsets for the given function slots are in the given exported
+    offsets. *)
+val reexport_value_slots : Value_slot.Set.t -> t -> t

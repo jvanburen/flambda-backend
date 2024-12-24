@@ -16,44 +16,40 @@
 
 (** Upwards environments used during simplification. *)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 type t
 
-val create : Downwards_env.are_rebuilding_terms -> t
+val create : Are_rebuilding_terms.t -> t
 
 val print : Format.formatter -> t -> unit
 
 val add_non_inlinable_continuation :
   t ->
   Continuation.t ->
-  Scope.t ->
-  params:Bound_parameter.t list ->
+  params:Bound_parameters.t ->
   handler:Rebuilt_expr.t Or_unknown.t ->
   t
 
-val add_unreachable_continuation :
-  t -> Continuation.t -> Scope.t -> Flambda_arity.With_subkinds.t -> t
+val add_invalid_continuation :
+  t -> Continuation.t -> [`Unarized] Flambda_arity.t -> t
 
 val add_continuation_alias :
   t ->
   Continuation.t ->
-  Flambda_arity.With_subkinds.t ->
+  [`Unarized] Flambda_arity.t ->
   alias_for:Continuation.t ->
   t
 
 val add_linearly_used_inlinable_continuation :
   t ->
   Continuation.t ->
-  Scope.t ->
-  params:Bound_parameter.t list ->
+  params:Bound_parameters.t ->
   handler:Rebuilt_expr.t ->
   free_names_of_handler:Name_occurrences.t ->
   cost_metrics_of_handler:Cost_metrics.t ->
   t
 
 val add_function_return_or_exn_continuation :
-  t -> Continuation.t -> Scope.t -> Flambda_arity.With_subkinds.t -> t
+  t -> Continuation.t -> [`Unarized] Flambda_arity.t -> t
 
 val find_continuation : t -> Continuation.t -> Continuation_in_env.t
 
@@ -66,6 +62,7 @@ val resolve_exn_continuation_aliases :
 
 val add_apply_cont_rewrite : t -> Continuation.t -> Apply_cont_rewrite.t -> t
 
-val find_apply_cont_rewrite : t -> Continuation.t -> Apply_cont_rewrite.t option
+val replace_apply_cont_rewrite :
+  t -> Continuation.t -> Apply_cont_rewrite.t -> t
 
-val delete_apply_cont_rewrite : t -> Continuation.t -> t
+val find_apply_cont_rewrite : t -> Continuation.t -> Apply_cont_rewrite.t option

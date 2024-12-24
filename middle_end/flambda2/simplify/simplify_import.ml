@@ -14,7 +14,7 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
+let debug = Flambda_features.debug_flambda2
 
 module Apply = Flambda.Apply
 module Apply_cont = Flambda.Apply_cont
@@ -33,26 +33,31 @@ module Recursive_let_cont_handlers = Flambda.Recursive_let_cont_handlers
 module Set_of_closures = Flambda.Set_of_closures
 module Switch = Flambda.Switch
 module AC = Apply_cont
+module BP = Bound_parameter
+module BPt = Bound_pattern
+module BV = Bound_var
 module CH = Continuation_handler
 module CIS = Code_id_or_symbol
 module CUE = Continuation_uses_env
 module DA = Downwards_acc
 module DE = Downwards_env
-module DF = Data_flow
 module EA = Continuation_extra_params_and_args.Extra_arg
 module EB = Expr_builder
 module EPA = Continuation_extra_params_and_args
 module FU = Flambda_unit
 module K = Flambda_kind
-module BP = Bound_parameter
+module KS = Flambda_kind.With_subkind
 module LC = Lifted_constant
 module LCS = Lifted_constant_state
 module NM = Name_mode
+module NO = Name_occurrences
 module P = Flambda_primitive
 module RE = Rebuilt_expr
+module RSC = Rebuilt_static_const
 module RI = Apply_cont_rewrite_id
 module S = Simplify_simple
 module SC = Static_const
+module SPR = Simplify_primitive_result
 module T = Flambda2_types
 module TE = Flambda2_types.Typing_env
 module TEE = Flambda2_types.Typing_env_extension

@@ -19,15 +19,13 @@
    NB: Due to internal state in the compiler, calling [main] twice during
    the same process is unsupported. *)
 val main
-   : string array
+   : (module Compiler_owee.Unix_intf.S)
+  -> string array
   -> Format.formatter
   -> flambda2:(
     ppf_dump:Format.formatter ->
     prefixname:string ->
-    filename:string ->
-    module_ident:Ident.t ->
-    module_block_size_in_words:int ->
-    module_initializer:Lambda.lambda ->
     keep_symbol_tables:bool ->
+    Lambda.program ->
     Cmm.phrase list)
   -> int

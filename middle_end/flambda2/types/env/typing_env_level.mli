@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 type t
 
 val print_equations : Format.formatter -> Type_grammar.t Name.Map.t -> unit
@@ -49,9 +47,9 @@ val add_definition : t -> Variable.t -> Flambda_kind.t -> Binding_time.t -> t
 
 val add_or_replace_equation : t -> Name.t -> Type_grammar.t -> t
 
-val concat : t -> t -> t
+val concat : earlier:t -> later:t -> t
 
-val all_ids_for_export : t -> Ids_for_export.t
+val ids_for_export : t -> Ids_for_export.t
 
 val find_kind : t -> Variable.t -> Flambda_kind.t
 
@@ -61,3 +59,5 @@ val variable_is_defined : t -> Variable.t -> bool
 
 val fold_on_defined_vars :
   (Variable.t -> Flambda_kind.t -> 'a -> 'a) -> t -> 'a -> 'a
+
+val as_extension_without_bindings : t -> Type_grammar.Env_extension.t

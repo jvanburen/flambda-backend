@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 type t
 
 val zero : t
@@ -23,6 +21,8 @@ val zero : t
 val from_size : Code_size.t -> t
 
 val size : t -> Code_size.t
+
+val removed : t -> Removed_operations.t
 
 val print : Format.formatter -> t -> unit
 

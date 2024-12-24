@@ -14,11 +14,9 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 open! Simplify_import
 
 val simplify_let :
   simplify_expr:Expr.t Simplify_common.expr_simplifier ->
-  simplify_toplevel:Simplify_common.simplify_toplevel ->
+  simplify_function_body:Simplify_common.simplify_function_body ->
   Let.t Simplify_common.expr_simplifier

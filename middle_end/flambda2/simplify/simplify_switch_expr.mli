@@ -14,8 +14,10 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 val simplify_switch :
-  simplify_let:Flambda.Let.t Simplify_common.expr_simplifier ->
+  simplify_let:
+    (simplify_expr:Flambda.Expr.t Simplify_common.expr_simplifier ->
+    simplify_function_body:Simplify_common.simplify_function_body ->
+    Flambda.Let.t Simplify_common.expr_simplifier) ->
+  simplify_function_body:Simplify_common.simplify_function_body ->
   Flambda.Switch.t Simplify_common.expr_simplifier

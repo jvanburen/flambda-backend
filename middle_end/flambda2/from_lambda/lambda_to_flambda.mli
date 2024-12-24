@@ -16,12 +16,11 @@
 
 (** Conversion from Lambda to Flambda. *)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 val lambda_to_flambda :
-  symbol_for_global:(?comp_unit:Compilation_unit.t -> Ident.t -> Symbol.t) ->
+  mode:'mode Flambda_features.mode ->
   big_endian:bool ->
-  module_ident:Ident.t ->
+  cmx_loader:Flambda_cmx.loader ->
+  compilation_unit:Compilation_unit.t ->
   module_block_size_in_words:int ->
   Lambda.lambda ->
-  Flambda_unit.t * Exported_code.t * Exported_offsets.t Or_unknown.t
+  'mode Closure_conversion.close_program_result

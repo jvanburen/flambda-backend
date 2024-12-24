@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 module type S = sig
   type t
 
@@ -25,12 +23,4 @@ module type S = sig
 
   (** Apply a renaming throughout a term. *)
   val apply_renaming : t -> Renaming.t -> t
-end
-
-module type S1 = sig
-  type 'a t
-
-  val free_names : ('a -> Name_occurrences.t) -> 'a t -> Name_occurrences.t
-
-  val apply_renaming : ('a -> Renaming.t -> 'a) -> 'a t -> Renaming.t -> 'a t
 end

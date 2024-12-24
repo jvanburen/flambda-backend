@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-9-30-40-41-42"]
-
 (** Simplification of primitive applications. *)
 
 val simplify_primitive :
@@ -23,4 +21,4 @@ val simplify_primitive :
   Flambda_primitive.t ->
   Debuginfo.t ->
   result_var:Bound_var.t ->
-  Simplified_named.t * Downwards_acc.t
+  Simplify_primitive_result.t

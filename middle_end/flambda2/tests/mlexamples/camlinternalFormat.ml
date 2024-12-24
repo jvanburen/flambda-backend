@@ -261,7 +261,7 @@ let infinity = float_of_bits 0x7F_F0_00_00_00_00_00_00L
 
 let neg_infinity = float_of_bits 0xFF_F0_00_00_00_00_00_00L
 
-let nan = float_of_bits 0x7F_F0_00_00_00_00_00_01L
+let nan = float_of_bits 0x7F_F8_00_00_00_00_00_01L
 
 let max_float = float_of_bits 0x7F_EF_FF_FF_FF_FF_FF_FFL
 
@@ -448,11 +448,9 @@ let flush_all () =
   let rec iter = function
     | [] -> ()
     | a :: l ->
-      begin
-        try flush a
-        with Sys_error _ ->
-          () (* ignore channels closed during a preceding flush. *)
-      end;
+      (try flush a
+       with Sys_error _ ->
+         () (* ignore channels closed during a preceding flush. *));
       iter l
   in
   iter (out_channels_list ())
@@ -569,7 +567,7 @@ let input_line chan =
       | [] -> raise End_of_file
       | _ -> build_result (bytes_create len) len accu
     else if n > 0
-    then begin
+    then (
       (* n > 0: newline found in buffer *)
       let res = bytes_create (n - 1) in
       ignore (unsafe_input chan res 0 (n - 1));
@@ -579,8 +577,7 @@ let input_line chan =
       | [] -> res
       | _ ->
         let len = len + n - 1 in
-        build_result (bytes_create len) len (res :: accu)
-    end
+        build_result (bytes_create len) len (res :: accu))
     else
       (* n < 0: newline not found *)
       let beg = bytes_create (-n) in
@@ -712,10 +709,9 @@ let at_exit f =
   exit_function
     := fun () ->
          if not !f_already_ran
-         then begin
+         then (
            f_already_ran := true;
-           f ()
-         end;
+           f ());
          g ()
 
 let do_at_exit () = !exit_function ()
@@ -1414,7 +1410,6 @@ let bprint_fmt buf fmt =
       fmtiter rest ign_flag
     | End_of_format -> ()
   in
-
   fmtiter fmt false
 
 (***)
@@ -2194,20 +2189,16 @@ let fix_padding padty width str =
   then str
   else
     let res = Bytes.make width (if padty = Zeros then '0' else ' ') in
-    begin
-      match padty with
-      | Left -> String.blit str 0 res 0 len
-      | Right -> String.blit str 0 res (width - len) len
-      | Zeros when len > 0 && (str.[0] = '+' || str.[0] = '-' || str.[0] = ' ')
-        ->
-        Bytes.set res 0 str.[0];
-        String.blit str 1 res (width - len + 1) (len - 1)
-      | Zeros when len > 1 && str.[0] = '0' && (str.[1] = 'x' || str.[1] = 'X')
-        ->
-        Bytes.set res 1 str.[1];
-        String.blit str 2 res (width - len + 2) (len - 2)
-      | Zeros -> String.blit str 0 res (width - len) len
-    end;
+    (match padty with
+    | Left -> String.blit str 0 res 0 len
+    | Right -> String.blit str 0 res (width - len) len
+    | Zeros when len > 0 && (str.[0] = '+' || str.[0] = '-' || str.[0] = ' ') ->
+      Bytes.set res 0 str.[0];
+      String.blit str 1 res (width - len + 1) (len - 1)
+    | Zeros when len > 1 && str.[0] = '0' && (str.[1] = 'x' || str.[1] = 'X') ->
+      Bytes.set res 1 str.[1];
+      String.blit str 2 res (width - len + 2) (len - 2)
+    | Zeros -> String.blit str 0 res (width - len) len);
     Bytes.unsafe_to_string res
 
 (* Add '0' padding to int, int32, nativeint or int64 string representation. *)
@@ -3014,19 +3005,16 @@ let fmt_ebb_of_string ?legacy_behavior str =
        ' (if the number is positive, pad with a space) does not make sense, but
        the legacy (< 4.02) implementation was happy to just ignore the space. *)
   in
-
   (* Raise [Failure] with a friendly error message. *)
   let invalid_format_message str_ind msg =
     failwith_message "invalid format %S: at character number %d, %s" str str_ind
       msg
   in
-
   (* Used when the end of the format (or the current sub-format) was encountered
      unexpectedly. *)
   let unexpected_end_of_format end_ind =
     invalid_format_message end_ind "unexpected end of format"
   in
-
   (* Used for %0c: no other widths are implemented *)
   let invalid_nonnull_char_width str_ind =
     invalid_format_message str_ind
@@ -3039,7 +3027,6 @@ let fmt_ebb_of_string ?legacy_behavior str =
       "invalid format %S: at character number %d, '%c' without %s" str str_ind c
       s
   in
-
   (* Raise [Failure] with a friendly error message about an unexpected
      character. *)
   let expected_character str_ind expected read =
@@ -3047,7 +3034,6 @@ let fmt_ebb_of_string ?legacy_behavior str =
       "invalid format %S: at character number %d, %s expected, read %C" str
       str_ind expected read
   in
-
   (* Parse the string from beg_ind (included) to end_ind (excluded). *)
   let rec parse : type e f. int -> int -> (_, _, e, f) fmt_ebb =
    fun beg_ind end_ind -> parse_literal beg_ind beg_ind end_ind
@@ -3147,7 +3133,7 @@ let fmt_ebb_of_string ?legacy_behavior str =
     | '*' ->
       parse_after_padding pct_ind (str_ind + 1) end_ind minus plus hash space
         ign (Arg_padding padty)
-    | _ -> begin
+    | _ -> (
       match padty with
       | Left ->
         if not legacy_behavior
@@ -3162,8 +3148,7 @@ let fmt_ebb_of_string ?legacy_behavior str =
           (Lit_padding (Right, 0))
       | Right ->
         parse_after_padding pct_ind str_ind end_ind minus plus hash space ign
-          No_padding
-    end
+          No_padding)
   (* Is precision defined? *)
   and parse_after_padding :
       type x e f.
@@ -3285,7 +3270,6 @@ let fmt_ebb_of_string ?legacy_behavior str =
     and ign_used = ref false
     and pad_used = ref false
     and prec_used = ref false in
-
     (* Access to options, update flags. *)
     let get_plus () =
       plus_used := true;
@@ -3309,7 +3293,6 @@ let fmt_ebb_of_string ?legacy_behavior str =
       pad_used := true;
       padprec
     in
-
     let get_int_pad () =
       (* %5.3d is accepted and meaningful: pad to length 5 with spaces, but
          first pad with zeros upto length 3 (0-padding is the interpretation of
@@ -3335,7 +3318,6 @@ let fmt_ebb_of_string ?legacy_behavior str =
       | (Lit_padding _ as pad), _ -> pad
       | (Arg_padding _ as pad), _ -> pad
     in
-
     (* Check that padty <> Zeros. *)
     let check_no_0 symb (type a b) (pad : (a, b) padding) =
       match pad with
@@ -3351,7 +3333,6 @@ let fmt_ebb_of_string ?legacy_behavior str =
         then Arg_padding Right
         else incompatible_flag pct_ind str_ind symb "0"
     in
-
     (* Get padding as a pad_option (see "%_", "%{", "%(" and "%["). (no need for
        legacy mode tweaking, those were rejected by the legacy parser as
        well) *)
@@ -3371,7 +3352,6 @@ let fmt_ebb_of_string ?legacy_behavior str =
     in
     let get_pad_opt c = opt_of_pad c (get_pad ()) in
     let get_padprec_opt c = opt_of_pad c (get_padprec ()) in
-
     (* Get precision as a prec_option (see "%_f"). (no need for legacy mode
        tweaking, those were rejected by the legacy parser as well) *)
     let get_prec_opt () =
@@ -3380,7 +3360,6 @@ let fmt_ebb_of_string ?legacy_behavior str =
       | Lit_precision ndec -> Some ndec
       | Arg_precision -> incompatible_flag pct_ind str_ind '_' "'*'"
     in
-
     let fmt_result =
       match symb with
       | ',' -> parse str_ind end_ind
@@ -3598,7 +3577,7 @@ let fmt_ebb_of_string ?legacy_behavior str =
        Such checks need to be disabled in legacy mode, as the legacy parser
        silently ignored incompatible flags. *)
     if not legacy_behavior
-    then begin
+    then (
       if (not !plus_used) && plus
       then incompatible_flag pct_ind str_ind symb "'+'";
       if (not !hash_used) && hash
@@ -3612,8 +3591,7 @@ let fmt_ebb_of_string ?legacy_behavior str =
         incompatible_flag pct_ind str_ind
           (if ign then '_' else symb)
           "`precision'";
-      if ign && plus then incompatible_flag pct_ind str_ind '_' "'+'"
-    end;
+      if ign && plus then incompatible_flag pct_ind str_ind '_' "'+'");
     (* this last test must not be disabled in legacy mode, as ignoring it would
        typically result in a different typing than what the legacy parser
        used *)
@@ -3756,7 +3734,6 @@ let fmt_ebb_of_string ?legacy_behavior str =
   (* Parse and construct a char set. *)
   and parse_char_set str_ind end_ind =
     if str_ind = end_ind then unexpected_end_of_format end_ind;
-
     let char_set = create_char_set () in
     let add_char c = add_in_char_set char_set c in
     let add_range c c' =
@@ -3764,14 +3741,12 @@ let fmt_ebb_of_string ?legacy_behavior str =
         add_in_char_set char_set (char_of_int i)
       done
     in
-
     let fail_single_percent str_ind =
       failwith_message
         "invalid format %S: '%%' alone is not accepted in character sets, use \
          %%%% instead at position %d."
         str str_ind
     in
-
     (* Parse the first character of a char set. *)
     let rec parse_char_set_start str_ind end_ind =
       if str_ind = end_ind then unexpected_end_of_format end_ind;
@@ -4003,7 +3978,6 @@ let fmt_ebb_of_string ?legacy_behavior str =
        in sub-format %S"
       str pct_ind option symb subfmt
   in
-
   parse 0 (String.length str)
 
 (******************************************************************************)

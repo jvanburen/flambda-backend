@@ -14,8 +14,10 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
+type t = Tag.t * Targetint_31_63.t
 
-type t = Tag.t * Targetint_31_63.Imm.t
+include Container_types.Make_pair (Tag) (Targetint_31_63)
 
-include Container_types.Make_pair (Tag) (Targetint_31_63.Imm)
+let tag (tag, _) = tag
+
+let size (_, size) = size

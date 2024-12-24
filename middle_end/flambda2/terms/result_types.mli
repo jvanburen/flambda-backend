@@ -12,31 +12,19 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 type t
 
 val create :
-  params:Bound_parameter.t list ->
-  results:Bound_parameter.t list ->
+  params:Bound_parameters.t ->
+  results:Bound_parameters.t ->
   Flambda2_types.Typing_env_extension.With_extra_variables.t ->
-  t
-
-val create_unknown :
-  params:Bound_parameter.t list ->
-  result_arity:Flambda_arity.With_subkinds.t ->
-  t
-
-val create_bottom :
-  params:Bound_parameter.t list ->
-  result_arity:Flambda_arity.With_subkinds.t ->
   t
 
 val pattern_match :
   t ->
   f:
-    (params:Bound_parameter.t list ->
-    results:Bound_parameter.t list ->
+    (params:Bound_parameters.t ->
+    results:Bound_parameters.t ->
     Flambda2_types.Typing_env_extension.With_extra_variables.t ->
     'a) ->
   'a

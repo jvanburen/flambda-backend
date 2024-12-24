@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 open Or_bottom.Let_syntax
 
 (* This module conceals the implementation of type ['head t]. Functions such as
@@ -54,37 +52,48 @@ module T : sig
 
   val unknown : _ t
 
-  val descr :
-    apply_renaming_head:('head -> Renaming.t -> 'head) ->
-    free_names_head:('head -> Name_occurrences.t) ->
-    'head t ->
-    'head Descr.t Or_unknown_or_bottom.t
+  val descr : 'head t -> 'head Descr.t Or_unknown_or_bottom.t
 
   val is_obviously_bottom : _ t -> bool
 
   val is_obviously_unknown : _ t -> bool
 
-  val get_alias_exn :
+  val get_alias_exn : 'head t -> Simple.t
+
+  val apply_renaming :
     apply_renaming_head:('head -> Renaming.t -> 'head) ->
     free_names_head:('head -> Name_occurrences.t) ->
     'head t ->
-    Simple.t
-
-  val apply_renaming : 'head t -> Renaming.t -> 'head t
+    Renaming.t ->
+    'head t
 
   val free_names :
-    apply_renaming_head:('head -> Renaming.t -> 'head) ->
     free_names_head:('head -> Name_occurrences.t) ->
     'head t ->
     Name_occurrences.t
 
-  val remove_unused_closure_vars :
-    apply_renaming_head:('head -> Renaming.t -> 'head) ->
+  val free_names_no_cache :
     free_names_head:('head -> Name_occurrences.t) ->
-    remove_unused_closure_vars_head:
-      ('head -> used_closure_vars:Var_within_closure.Set.t -> 'head) ->
     'head t ->
-    used_closure_vars:Var_within_closure.Set.t ->
+    Name_occurrences.t
+
+  val remove_unused_value_slots_and_shortcut_aliases :
+    remove_unused_value_slots_and_shortcut_aliases_head:
+      ('head ->
+      used_value_slots:Value_slot.Set.t ->
+      canonicalise:(Simple.t -> Simple.t) ->
+      'head) ->
+    'head t ->
+    used_value_slots:Value_slot.Set.t ->
+    canonicalise:(Simple.t -> Simple.t) ->
+    'head t
+
+  val project_variables_out :
+    free_names_head:('head -> Name_occurrences.t) ->
+    to_project:Variable.Set.t ->
+    expand:(Variable.t -> coercion:Coercion.t -> 'head t) ->
+    project_head:('head -> 'head) ->
+    'head t ->
     'head t
 end = struct
   module Descr = struct
@@ -96,12 +105,11 @@ end = struct
       match t with
       | No_alias head -> print_head ppf head
       | Equals simple ->
-        Format.fprintf ppf "@[(@<0>%s=@<0>%s %a)@]" (Flambda_colours.error ())
-          (Flambda_colours.normal ())
-          Simple.print simple
+        Format.fprintf ppf "@[(%t=%t %a)@]" Flambda_colours.error
+          Flambda_colours.pop Simple.print simple
 
     let[@inline always] apply_renaming ~apply_renaming_head t renaming =
-      if Renaming.is_empty renaming
+      if Renaming.is_identity renaming
       then t
       else
         match t with
@@ -116,37 +124,63 @@ end = struct
       match t with
       | No_alias head -> free_names_head head
       | Equals simple ->
-        Name_occurrences.downgrade_occurrences_at_strictly_greater_kind
+        Name_occurrences.downgrade_occurrences_at_strictly_greater_name_mode
           (Simple.free_names simple) Name_mode.in_types
 
-    let remove_unused_closure_vars ~remove_unused_closure_vars_head t
-        ~used_closure_vars =
+    let remove_unused_value_slots_and_shortcut_aliases
+        ~remove_unused_value_slots_and_shortcut_aliases_head t ~used_value_slots
+        ~canonicalise =
       match t with
       | No_alias head ->
-        let head' = remove_unused_closure_vars_head head ~used_closure_vars in
+        let head' =
+          remove_unused_value_slots_and_shortcut_aliases_head head
+            ~used_value_slots ~canonicalise
+        in
         if head == head' then t else No_alias head'
-      | Equals _ -> t
+      | Equals alias ->
+        let canonical = canonicalise alias in
+        if alias == canonical then t else Equals canonical
+
+    type ('head, 'descr) project_result =
+      | Not_expanded of 'head t
+      | Expanded of 'descr
+
+    let project_variables_out ~to_project ~expand ~project_head t =
+      match t with
+      | No_alias head ->
+        let head' = project_head head in
+        if head == head' then Not_expanded t else Not_expanded (No_alias head')
+      | Equals simple ->
+        Simple.pattern_match' simple
+          ~const:(fun _ -> Not_expanded t)
+          ~symbol:(fun symbol ~coercion ->
+            if Coercion.is_id coercion
+            then Not_expanded t
+            else
+              (* Coercions might contain variables. Removing any coercion
+                 happens to fix all potential problems. *)
+              Not_expanded (Equals (Simple.symbol symbol)))
+          ~var:(fun var ~coercion ->
+            if Variable.Set.mem var to_project
+            then Expanded (expand var ~coercion)
+            else Not_expanded t)
   end
 
-  module WDR = With_delayed_renaming
+  module WCFN = With_cached_free_names
 
-  type 'head t = 'head Descr.t WDR.t Or_unknown_or_bottom.t
+  type 'head t = 'head WCFN.t Descr.t Or_unknown_or_bottom.t
 
-  let[@inline always] descr ~apply_renaming_head ~free_names_head (t : _ t) :
-      _ Descr.t Or_unknown_or_bottom.t =
+  let[@inline always] descr (t : 'head t) : 'head Descr.t Or_unknown_or_bottom.t
+      =
     match t with
     | Unknown -> Unknown
     | Bottom -> Bottom
-    | Ok wdp ->
-      Ok
-        (WDR.descr
-           ~apply_renaming_descr:(Descr.apply_renaming ~apply_renaming_head)
-           ~free_names_descr:(Descr.free_names ~free_names_head)
-           wdp)
+    | Ok (Equals simple) -> Ok (Equals simple)
+    | Ok (No_alias wcfn) -> Ok (No_alias (WCFN.descr wcfn))
 
-  let create head : _ t = Ok (WDR.create (Descr.No_alias head))
+  let create head : _ t = Ok (Descr.No_alias (WCFN.create head))
 
-  let create_equals simple : _ t = Ok (WDR.create (Descr.Equals simple))
+  let create_equals simple : _ t = Ok (Descr.Equals simple)
 
   let bottom : _ t = Bottom
 
@@ -158,79 +192,82 @@ end = struct
   let is_obviously_unknown (t : _ t) =
     match t with Unknown -> true | Bottom | Ok _ -> false
 
-  let[@inline always] get_alias_exn ~apply_renaming_head ~free_names_head
-      (t : _ t) =
+  let[@inline always] get_alias_exn (t : _ t) =
     match t with
-    | Unknown | Bottom -> raise Not_found
-    | Ok wdp -> (
-      (* This uses [peek_descr] first to avoid unnecessary application of
-         permutations. *)
-      match WDR.peek_descr wdp with
-      | No_alias _ -> raise Not_found
-      | Equals _ -> (
-        match
-          WDR.descr
-            ~apply_renaming_descr:(Descr.apply_renaming ~apply_renaming_head)
-            ~free_names_descr:(Descr.free_names ~free_names_head)
-            wdp
-        with
-        | Equals alias -> alias
-        | No_alias _ -> assert false))
+    | Unknown | Bottom | Ok (No_alias _) -> raise Not_found
+    | Ok (Equals alias) -> alias
 
-  let apply_renaming (t : _ t) renaming : _ t =
+  let apply_renaming ~apply_renaming_head ~free_names_head (t : _ t) renaming :
+      _ t =
     match t with
     | Unknown | Bottom -> t
-    | Ok wdp ->
-      let wdp' = WDR.apply_renaming wdp renaming in
-      if wdp == wdp' then t else Ok wdp'
+    | Ok descr ->
+      let descr' =
+        Descr.apply_renaming
+          ~apply_renaming_head:
+            (WCFN.apply_renaming ~apply_renaming_descr:apply_renaming_head
+               ~free_names_descr:free_names_head)
+          descr renaming
+      in
+      if descr == descr' then t else Ok descr'
 
-  let free_names ~apply_renaming_head ~free_names_head (t : _ t) =
+  let free_names ~free_names_head (t : _ t) =
     match t with
     | Unknown | Bottom -> Name_occurrences.empty
-    | Ok wdp ->
-      WDR.free_names
-        ~apply_renaming_descr:(Descr.apply_renaming ~apply_renaming_head)
-        ~free_names_descr:(Descr.free_names ~free_names_head)
-        wdp
+    | Ok descr ->
+      Descr.free_names
+        ~free_names_head:(WCFN.free_names ~free_names_descr:free_names_head)
+        descr
 
-  let remove_unused_closure_vars ~apply_renaming_head ~free_names_head
-      ~remove_unused_closure_vars_head (t : _ t) ~used_closure_vars : _ t =
+  let free_names_no_cache ~free_names_head (t : _ t) =
+    match t with
+    | Unknown | Bottom -> Name_occurrences.empty
+    | Ok descr ->
+      Descr.free_names
+        ~free_names_head:
+          (WCFN.free_names_no_cache ~free_names_descr:free_names_head)
+        descr
+
+  let remove_unused_value_slots_and_shortcut_aliases
+      ~remove_unused_value_slots_and_shortcut_aliases_head (t : _ t)
+      ~used_value_slots ~canonicalise : _ t =
     match t with
     | Unknown | Bottom -> t
-    | Ok wdr ->
-      let wdr' =
-        WDR.remove_unused_closure_vars
-          ~apply_renaming_descr:(Descr.apply_renaming ~apply_renaming_head)
-          ~free_names_descr:(Descr.free_names ~free_names_head)
-          ~remove_unused_closure_vars_descr:
-            (Descr.remove_unused_closure_vars ~remove_unused_closure_vars_head)
-          wdr ~used_closure_vars
+    | Ok descr ->
+      let descr' =
+        Descr.remove_unused_value_slots_and_shortcut_aliases
+          ~remove_unused_value_slots_and_shortcut_aliases_head:
+            (WCFN.remove_unused_value_slots_and_shortcut_aliases
+               ~remove_unused_value_slots_and_shortcut_aliases_descr:
+                 remove_unused_value_slots_and_shortcut_aliases_head)
+          descr ~used_value_slots ~canonicalise
       in
-      if wdr == wdr' then t else Ok wdr'
+      if descr == descr' then t else Ok descr'
+
+  let project_variables_out ~free_names_head ~to_project ~expand ~project_head
+      (t : _ t) : _ t =
+    match t with
+    | Unknown | Bottom -> t
+    | Ok descr -> (
+      let project_head wdr =
+        WCFN.project_variables_out ~free_names_descr:free_names_head ~to_project
+          ~project_descr:project_head wdr
+      in
+      match
+        Descr.project_variables_out ~to_project ~expand ~project_head descr
+      with
+      | Not_expanded descr' -> if descr == descr' then t else Ok descr'
+      | Expanded t' -> t')
 end
 
 include T
 
-let print ~print_head ~apply_renaming_head ~free_names_head ppf t =
-  let colour = Flambda_colours.top_or_bottom_type () in
-  match descr ~apply_renaming_head ~free_names_head t with
-  | Unknown ->
-    if Flambda_features.unicode ()
-    then
-      Format.fprintf ppf "@<0>%s@<1>\u{22a4}@<0>%s" colour
-        (Flambda_colours.normal ())
-    else Format.fprintf ppf "@<0>%sT@<0>%s" colour (Flambda_colours.normal ())
-  | Bottom ->
-    if Flambda_features.unicode ()
-    then
-      Format.fprintf ppf "@<0>%s@<1>\u{22a5}@<0>%s" colour
-        (Flambda_colours.normal ())
-    else Format.fprintf ppf "@<0>%s_|_@<0>%s" colour (Flambda_colours.normal ())
-  | Ok descr -> Descr.print ~print_head ppf descr
+let print ~print_head ppf t =
+  Or_unknown_or_bottom.print (Descr.print ~print_head) ppf (descr t)
 
-let[@inline always] apply_coercion ~apply_coercion_head ~apply_renaming_head
-    ~free_names_head coercion t : _ t Or_bottom.t =
-  match descr ~apply_renaming_head ~free_names_head t with
+let[@inline always] apply_coercion ~apply_coercion_head coercion t :
+    _ t Or_bottom.t =
+  match descr t with
   | Unknown | Bottom -> Ok t
   | Ok (Equals simple) -> (
     match Simple.apply_coercion simple coercion with
@@ -240,9 +277,8 @@ let[@inline always] apply_coercion ~apply_coercion_head ~apply_renaming_head
     let<+ head = apply_coercion_head head coercion in
     create head
 
-let all_ids_for_export ~apply_renaming_head ~free_names_head
-    ~all_ids_for_export_head (t : _ t) =
-  match descr ~apply_renaming_head ~free_names_head t with
+let ids_for_export ~ids_for_export_head (t : _ t) =
+  match descr t with
   | Unknown | Bottom -> Ids_for_export.empty
-  | Ok (No_alias head) -> all_ids_for_export_head head
+  | Ok (No_alias head) -> ids_for_export_head head
   | Ok (Equals simple) -> Ids_for_export.from_simple simple

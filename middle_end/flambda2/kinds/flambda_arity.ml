@@ -5,8 +5,8 @@
 (*                       Pierre Chambart, OCamlPro                        *)
 (*           Mark Shinwell and Leo White, Jane Street Europe              *)
 (*                                                                        *)
-(*   Copyright 2013--2017 OCamlPro SAS                                    *)
-(*   Copyright 2014--2017 Jane Street Group LLC                           *)
+(*   Copyright 2013--2023 OCamlPro SAS                                    *)
+(*   Copyright 2014--2023 Jane Street Group LLC                           *)
 (*                                                                        *)
 (*   All rights reserved.  This file is distributed under the terms of    *)
 (*   the GNU Lesser General Public License version 2.1, with the          *)
@@ -14,94 +14,135 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-9-30-40-41-42"]
+module K = Flambda_kind
+module KS = Flambda_kind.With_subkind
 
-type t = Flambda_kind.t list
+module Component = struct
+  type _ t =
+    | Singleton : KS.t -> [> ] t
+    | Unboxed_product : _ t list -> [`Complex] t
+
+  let rec equal_ignoring_subkinds : type uc1 uc2. uc1 t -> uc2 t -> bool =
+   fun t1 t2 ->
+    match t1, t2 with
+    | Singleton kind1, Singleton kind2 ->
+      KS.equal (KS.erase_subkind kind1) (KS.erase_subkind kind2)
+    | Unboxed_product ts1, Unboxed_product ts2 ->
+      Misc.Stdlib.List.equal equal_ignoring_subkinds ts1 ts2
+    | Singleton _, Unboxed_product _ | Unboxed_product _, Singleton _ -> false
+
+  let rec equal_exact : type uc1 uc2. uc1 t -> uc2 t -> bool =
+   fun t1 t2 ->
+    match t1, t2 with
+    | Singleton kind1, Singleton kind2 -> KS.equal kind1 kind2
+    | Unboxed_product ts1, Unboxed_product ts2 ->
+      Misc.Stdlib.List.equal equal_exact ts1 ts2
+    | Singleton _, Unboxed_product _ | Unboxed_product _, Singleton _ -> false
+
+  let rec print : type uc. Format.formatter -> uc t -> unit =
+   fun ppf t ->
+    match t with
+    | Singleton kind -> KS.print ppf kind
+    | Unboxed_product [] -> Format.pp_print_string ppf "void"
+    | Unboxed_product ts ->
+      Format.fprintf ppf "@[<hov 1>%t#%t(%a)@]" Flambda_colours.unboxed_product
+        Flambda_colours.pop
+        (Format.pp_print_list
+           ~pp_sep:(fun ppf () -> Format.fprintf ppf " @<1>\u{2a2f} ")
+           print)
+        ts
+
+  let rec unarize : type uc. uc t -> KS.t list =
+   fun t ->
+    match t with
+    | Singleton kind -> [kind]
+    | Unboxed_product [] -> []
+    | Unboxed_product ts -> List.concat_map unarize ts
+
+  let component : [`Unarized] t -> KS.t =
+   fun t -> match t with Singleton kind -> kind
+end
+
+type 'uc t = 'uc Component.t list
+
+module Component_for_creation = struct
+  type 'uc t = 'uc Component.t =
+    | Singleton : KS.t -> [> ] t
+    | Unboxed_product : _ t list -> [`Complex] t
+
+  let rec from_lambda (layout : Lambda.layout) =
+    match layout with
+    | Pvalue vk -> Singleton (KS.from_lambda_value_kind vk)
+    | Punboxed_float Unboxed_float64 -> Singleton KS.naked_float
+    | Punboxed_float Unboxed_float32 -> Singleton KS.naked_float32
+    | Punboxed_int Unboxed_int32 -> Singleton KS.naked_int32
+    | Punboxed_int Unboxed_int64 -> Singleton KS.naked_int64
+    | Punboxed_int Unboxed_nativeint -> Singleton KS.naked_nativeint
+    | Punboxed_vector Unboxed_vec128 -> Singleton KS.naked_vec128
+    | Punboxed_product layouts -> Unboxed_product (List.map from_lambda layouts)
+    | Ptop | Pbottom ->
+      Misc.fatal_errorf
+        "Cannot convert %a to Flambda_arity.Component_for_creation"
+        Printlambda.layout layout
+end
 
 let nullary = []
 
 let create t = t
 
-let length t = List.length t
+let create_singletons t = List.map (fun kind -> Component.Singleton kind) t
 
-include Container_types.Make (struct
-  type nonrec t = t
+let print ppf t =
+  Format.fprintf ppf "@[%a@]"
+    (Format.pp_print_list Component.print ~pp_sep:(fun ppf () ->
+         Format.fprintf ppf " @<1>\u{2a2f} "))
+    t
 
-  let compare t1 t2 = Misc.Stdlib.List.compare Flambda_kind.compare t1 t2
+let equal_ignoring_subkinds : type uc1 uc2. uc1 t -> uc2 t -> bool =
+ fun t1 t2 -> Misc.Stdlib.List.equal Component.equal_ignoring_subkinds t1 t2
 
-  let equal t1 t2 = compare t1 t2 = 0
+let equal_exact : type uc1 uc2. uc1 t -> uc2 t -> bool =
+ fun t1 t2 -> Misc.Stdlib.List.equal Component.equal_exact t1 t2
 
-  let hash = Hashtbl.hash
-
-  let [@ocamlformat "disable"] print ppf t =
-    match t with
-    | [] -> Format.pp_print_string ppf "Nullary"
-    | _ ->
-      Format.fprintf ppf "@[%a@]"
-        (Format.pp_print_list
-          ~pp_sep:(fun ppf () -> Format.fprintf ppf " @<1>\u{2a2f} ")
-          Flambda_kind.print)
-        t
-end)
-
-let is_all_values t = List.for_all Flambda_kind.is_value t
-
-let is_all_naked_floats t = List.for_all Flambda_kind.is_naked_float t
-
-let is_singleton_value t =
+let is_one_param_of_kind_value : type uc. uc t -> bool =
+ fun t ->
   match t with
-  | [kind] when Flambda_kind.equal kind Flambda_kind.value -> true
-  | _ -> false
+  | [Component.Singleton kind] when K.equal (KS.kind kind) K.value -> true
+  | [] | Singleton _ :: _ | Unboxed_product _ :: _ -> false
 
-module With_subkinds = struct
-  type arity = t
+let unarize t = t |> List.map Component.unarize |> List.concat
 
-  type t = Flambda_kind.With_subkind.t list
+let unarized_components (t : [`Unarized] t) = List.map Component.component t
 
-  let create t = t
+let unarize_per_parameter t = t |> List.map Component.unarize
 
-  include Container_types.Make (struct
-    type nonrec t = t
+let unarize_t t = t |> unarize |> create_singletons
 
-    let compare t1 t2 =
-      Misc.Stdlib.List.compare Flambda_kind.With_subkind.compare t1 t2
+let fresh_idents_unarized t ~id =
+  List.mapi
+    (fun n kind ->
+      let ident =
+        Ident.create_local
+          (Printf.sprintf "%s_unboxed%d" (Ident.unique_name id) n)
+      in
+      ident, kind)
+    (unarize t)
 
-    let equal t1 t2 = compare t1 t2 = 0
+let cardinal_unarized t = List.length (unarize t)
 
-    let hash = Hashtbl.hash
+let num_params t = List.length t
 
-    let [@ocamlformat "disable"] print ppf t =
-      match t with
-      | [] -> Format.pp_print_string ppf "Nullary"
-      | _ ->
-        Format.fprintf ppf "@[%a@]"
-          (Format.pp_print_list
-            ~pp_sep:(fun ppf () -> Format.fprintf ppf " @<1>\u{2a2f} ")
-            Flambda_kind.With_subkind.print)
-          t
-  end)
+let from_lambda_list layouts =
+  layouts |> List.map Component_for_creation.from_lambda |> create
 
-  let is_singleton_value t =
-    match t with
-    | [kind]
-      when Flambda_kind.equal
-             (Flambda_kind.With_subkind.kind kind)
-             Flambda_kind.value ->
-      true
-    | _ -> false
+let partially_apply t ~num_non_unarized_params_provided =
+  if num_non_unarized_params_provided < 0
+     (* We allow the case where all of the parameters are applied, to make this
+        function more general. *)
+     || num_non_unarized_params_provided > List.length t
+  then
+    Misc.fatal_errorf "Bad num_non_unarized_params_provided (%d): %a"
+      num_non_unarized_params_provided print t
+  else snd (Misc.Stdlib.List.split_at num_non_unarized_params_provided t)
 
-  let to_arity t = List.map Flambda_kind.With_subkind.kind t
-
-  let of_arity arity =
-    List.map (fun kind -> Flambda_kind.With_subkind.create kind Anything) arity
-
-  let compatible t ~when_used_at =
-    if List.compare_lengths t when_used_at <> 0
-    then
-      Misc.fatal_errorf "Mismatched arities:@ %a@ and@ %a" print t print
-        when_used_at;
-    List.for_all2
-      (fun kind when_used_at ->
-        Flambda_kind.With_subkind.compatible kind ~when_used_at)
-      t when_used_at
-end
+let concat t1 t2 = t1 @ t2

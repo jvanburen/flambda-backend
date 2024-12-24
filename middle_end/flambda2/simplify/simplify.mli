@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 (** Simplification of Flambda programs: inlining, specialisation, unboxing and
     so forth.
 
@@ -23,15 +21,16 @@
     [Inlining_decision] module first. *)
 
 type simplify_result = private
-  { cmx : Flambda_cmx_format.t option;
-    unit : Flambda_unit.t;
+  { free_names : Name_occurrences.t;
+    final_typing_env : Typing_env.t option;
     all_code : Exported_code.t;
-    exported_offsets : Exported_offsets.t
+    slot_offsets : Slot_offsets.t;
+    unit : Flambda_unit.t
   }
 
 val run :
-  symbol_for_global:(?comp_unit:Compilation_unit.t -> Ident.t -> Symbol.t) ->
-  get_global_info:(Compilation_unit.t -> Flambda_cmx_format.t option) ->
+  cmx_loader:Flambda_cmx.loader ->
   round:int ->
+  code_slot_offsets:Slot_offsets.t Code_id.Map.t ->
   Flambda_unit.t ->
   simplify_result

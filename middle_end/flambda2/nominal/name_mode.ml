@@ -14,12 +14,12 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 type t =
   | Normal
   | Phantom
   | In_types
+
+type name_mode = t
 
 (* Semilattice:
  *
@@ -29,14 +29,12 @@ type t =
  *  In_types   Phantom
  *)
 
-let max_in_terms t1 t2 =
+let join_in_terms t1 t2 =
   match t1, t2 with
   | Normal, Normal | Phantom, Phantom -> t1
   | Normal, Phantom | Phantom, Normal -> Normal
   | In_types, _ | _, In_types ->
-    Misc.fatal_error "Cannot use [max_in_terms] with [In_types] mode"
-
-type kind = t
+    Misc.fatal_error "Cannot use [join_in_terms] with [In_types] mode"
 
 let normal = Normal
 
@@ -44,31 +42,11 @@ let in_types = In_types
 
 let phantom = Phantom
 
-(* The integer ordering is used by [Name_occurrences] and must agree with the
-   partial ordering below. *)
-(* CR mshinwell: add unit test for this, and also that the total ordering below
-   is a linear extension of the partial ordering. *)
-
-let of_int i =
-  match i with
-  | 0 -> Phantom
-  | 1 -> In_types
-  | 2 -> Normal
-  | _ -> Misc.fatal_errorf "Name_mode.of_int %d" i
-
-let to_int t = match t with Phantom -> 0 | In_types -> 1 | Normal -> 2
-
-let max_to_int = 2
-
 let is_normal t = match t with Normal -> true | In_types | Phantom -> false
 
 let is_phantom t = match t with Phantom -> true | In_types | Normal -> false
 
-let min_in_types = In_types
-
-let min_in_terms = Phantom
-
-let top = Normal
+let is_in_types t = match t with In_types -> true | Normal | Phantom -> false
 
 let can_be_in_terms t =
   match t with Normal | Phantom -> true | In_types -> false
@@ -111,11 +89,11 @@ let compare _ _ = `Be_explicit_about_total_or_partial_ordering
 module Or_absent = struct
   type t =
     | Absent
-    | Present of kind
+    | Present of name_mode
 
   let absent = Absent
 
-  let present kind = Present kind
+  let present name_mode = Present name_mode
 
   let is_present = function Absent -> false | Present _ -> true
 
@@ -130,8 +108,8 @@ module Or_absent = struct
     let [@ocamlformat "disable"] print ppf t =
       match t with
       | Absent -> Format.pp_print_string ppf "Absent"
-      | Present kind ->
-        Format.fprintf ppf "@[<hov 1>(Present@ %a)@]" print kind
+      | Present name_mode ->
+        Format.fprintf ppf "@[<hov 1>(Present@ %a)@]" print name_mode
 
     let hash _ = Misc.fatal_error "Not yet implemented"
 
@@ -140,12 +118,11 @@ module Or_absent = struct
       | Absent, Absent -> 0
       | Absent, Present _ -> -1
       | Present _, Absent -> 1
-      | Present kind1, Present kind2 -> compare_total_order kind1 kind2
+      | Present name_mode1, Present name_mode2 ->
+        compare_total_order name_mode1 name_mode2
 
     let equal t1 t2 = compare t1 t2 = 0
   end)
-
-  let compare_total_order = compare
 
   let compare _ _ = `Be_explicit_about_total_or_partial_ordering
 
@@ -154,12 +131,14 @@ module Or_absent = struct
     | Absent, Absent -> Some 0
     | Absent, Present _ -> Some (-1)
     | Present _, Absent -> Some 1
-    | Present kind1, Present kind2 -> compare_partial_order kind1 kind2
+    | Present name_mode1, Present name_mode2 ->
+      compare_partial_order name_mode1 name_mode2
+
+  let join_in_terms t1 t2 =
+    match t1, t2 with
+    | Absent, Absent -> Absent
+    | Absent, Present _ -> t2
+    | Present _, Absent -> t1
+    | Present name_mode1, Present name_mode2 ->
+      Present (join_in_terms name_mode1 name_mode2)
 end
-
-type descr = t =
-  | Normal
-  | Phantom
-  | In_types
-
-let descr t = t

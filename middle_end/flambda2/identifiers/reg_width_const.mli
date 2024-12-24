@@ -16,12 +16,16 @@
 
 (** Constants that fit in registers on the target machine. *)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 include module type of struct
-  include Reg_width_things.Const
+  include Int_ids.Const
 end
 
-val kind : t -> Flambda_kind.t
-
 val of_descr : Descr.t -> t
+
+val is_naked_immediate : t -> Targetint_31_63.t option
+
+val is_tagged_immediate : t -> Targetint_31_63.t option
+
+(** Create a numeric constant of the given kind ([Region] and [Rec_info] are
+    forbidden). *)
+val of_int_of_kind : Flambda_kind.t -> int -> t

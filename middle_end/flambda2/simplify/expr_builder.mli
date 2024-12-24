@@ -23,9 +23,22 @@
     Some expressions are rebuilt directly using the functions in [Rebuilt_expr]
     rather than using this module. *)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 open! Flambda.Import
+
+val create_let_binding :
+  Upwards_acc.t ->
+  Bound_pattern.t ->
+  Named.t ->
+  free_names_of_defining_expr:Name_occurrences.t ->
+  body:Rebuilt_expr.t ->
+  cost_metrics_of_defining_expr:Cost_metrics.t ->
+  Rebuilt_expr.t * Upwards_acc.t
+
+type binding_to_place =
+  { let_bound : Bound_pattern.t;
+    simplified_defining_expr : Simplified_named.t;
+    original_defining_expr : Named.t option
+  }
 
 (** Create [Let] binding(s) around a given body. (The type of this function
     prevents it from being used to create "let symbol" bindings; use the other
@@ -36,18 +49,15 @@ open! Flambda.Import
     names of the [body]. *)
 val make_new_let_bindings :
   Upwards_acc.t ->
-  bindings_outermost_first:Simplify_named_result.binding_to_place list ->
+  bindings_outermost_first:binding_to_place list ->
   body:Rebuilt_expr.t ->
   Rebuilt_expr.t * Upwards_acc.t
 
 (** Create the "let symbol" binding(s) around a given body necessary to define
-    the given lifted constant. Two optimisations are performed:
+    the given lifted constant.
 
-    1. Best efforts are made not to create the binding(s) if it/they would be
-    redundant.
-
-    2. Closure variables are removed if they are not used according to the given
-    [uacc]. (Such [uacc] must have seen all uses in the whole compilation unit.)
+    Value slots are removed if they are not used according to the given [uacc].
+    (Such [uacc] must have seen all uses in the whole compilation unit.)
 
     The [name_occurrences] in the provided [uacc] must contain exactly the free
     names of the [body]. *)
@@ -57,12 +67,8 @@ val create_let_symbols :
   body:Rebuilt_expr.t ->
   Rebuilt_expr.t * Upwards_acc.t
 
-(** Place lifted constants whose defining expressions involve [Name]s (for
-    example those bound by a [Let] or a [Let_cont]) that are about to go out of
-    scope.
-
-    The [name_occurrences] in the provided [uacc] must contain exactly the free
-    names of the [body]. *)
+(** Place lifted constants arising from a let-expr (coming from both the
+    defining_expr and the body). *)
 val place_lifted_constants :
   Upwards_acc.t ->
   lifted_constants_from_defining_expr:Lifted_constant_state.t ->
@@ -76,58 +82,68 @@ val place_lifted_constants :
     [Invalid], and one-arm switches to [Apply_cont]. *)
 val create_switch :
   Upwards_acc.t ->
+  condition_dbg:Debuginfo.t ->
   scrutinee:Simple.t ->
   arms:Apply_cont.t Targetint_31_63.Map.t ->
   Rebuilt_expr.t * Upwards_acc.t
 
+type new_let_cont =
+  { cont : Continuation.t;
+    handler : Rebuilt_expr.Continuation_handler.t;
+    free_names_of_handler : Name_occurrences.t;
+    cost_metrics_of_handler : Cost_metrics.t
+  }
+
+val bind_let_conts :
+  Upwards_acc.t ->
+  body:Rebuilt_expr.t ->
+  new_let_cont list ->
+  Upwards_acc.t * Rebuilt_expr.t
+
 val rebuild_invalid :
   Upwards_acc.t ->
+  Flambda.Invalid.t ->
   after_rebuild:
     (Rebuilt_expr.t -> Upwards_acc.t -> Rebuilt_expr.t * Upwards_acc.t) ->
   Rebuilt_expr.t * Upwards_acc.t
 
-type add_wrapper_for_switch_arm_result = private
-  | Apply_cont of Apply_cont.t
-  | New_wrapper of
-      Continuation.t
-      * Rebuilt_expr.Continuation_handler.t
-      * Name_occurrences.t
-      * Cost_metrics.t
+(** Handling of the rewriting of continuation use sites. *)
 
-val add_wrapper_for_switch_arm :
-  Upwards_acc.t ->
-  Apply_cont.t ->
-  use_id:Apply_cont_rewrite_id.t ->
-  Flambda_arity.With_subkinds.t ->
-  add_wrapper_for_switch_arm_result
-
-val add_wrapper_for_fixed_arity_apply :
-  Upwards_acc.t ->
-  use_id:Apply_cont_rewrite_id.t ->
-  Flambda_arity.With_subkinds.t ->
-  Apply.t ->
-  Rebuilt_expr.t * Upwards_acc.t
-
-type rewrite_use_ctx =
-  | Apply_cont
-  | Apply_expr of Simple.t list
-
-type rewrite_use_result = private
+type rewrite_apply_cont_result = private
+  | Invalid of { message : string }
   | Apply_cont of Apply_cont.t
   | Expr of
       (apply_cont_to_expr:
          (Apply_cont.t -> Rebuilt_expr.t * Cost_metrics.t * Name_occurrences.t) ->
       Rebuilt_expr.t * Cost_metrics.t * Name_occurrences.t)
 
-val no_rewrite : Apply_cont.t -> rewrite_use_result
+type rewrite_switch_arm_result = private
+  | Invalid of { message : string }
+  | Apply_cont of Apply_cont.t
+  | New_wrapper of new_let_cont
 
-val rewrite_use :
+val no_rewrite_apply_cont : Apply_cont.t -> rewrite_apply_cont_result
+
+val rewrite_apply_cont :
   Upwards_acc.t ->
   Apply_cont_rewrite.t ->
-  ctx:rewrite_use_ctx ->
   Apply_cont_rewrite_id.t ->
   Apply_cont.t ->
-  rewrite_use_result
+  rewrite_apply_cont_result
+
+val rewrite_switch_arm :
+  Upwards_acc.t ->
+  Apply_cont.t ->
+  use_id:Apply_cont_rewrite_id.t ->
+  [`Unarized] Flambda_arity.t ->
+  rewrite_switch_arm_result
+
+val rewrite_fixed_arity_apply :
+  Upwards_acc.t ->
+  use_id:Apply_cont_rewrite_id.t option ->
+  [`Unarized] Flambda_arity.t ->
+  Apply.t ->
+  Upwards_acc.t * Rebuilt_expr.t
 
 val rewrite_exn_continuation :
   Apply_cont_rewrite.t ->

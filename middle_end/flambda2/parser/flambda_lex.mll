@@ -33,11 +33,13 @@ let keyword_table =
     "always", KWD_ALWAYS;
     "and", KWD_AND;
     "andwhere", KWD_ANDWHERE;
+    "any", KWD_ANY;
     "apply", KWD_APPLY;
+    "array", KWD_ARRAY;
     "asr", KWD_ASR;
     "available", KWD_AVAILABLE;
-    "Block", KWD_BLOCK;
     "boxed", KWD_BOXED;
+    "bswap", KWD_BSWAP;
     "ccall", KWD_CCALL;
     "closure", KWD_CLOSURE;
     "code", KWD_CODE;
@@ -47,13 +49,15 @@ let keyword_table =
     "deleted", KWD_DELETED;
     "depth", KWD_DEPTH;
     "direct", KWD_DIRECT;
+    "do_not_inline", KWD_DO_NOT_INLINE;
     "done", KWD_DONE;
     "end", KWD_END;
     "error", KWD_ERROR;
     "exn", KWD_EXN;
-    "fabricated", KWD_FABRICATED;
     "float", KWD_FLOAT;
+    "generic", KWD_GENERIC;
     "halt_and_catch_fire", KWD_HCF;
+    "heap_or_local", KWD_HEAP_OR_LOCAL;
     "hint", KWD_HINT;
     "id", KWD_ID;
     "imm", KWD_IMM;
@@ -65,7 +69,13 @@ let keyword_table =
     "inlining_state", KWD_INLINING_STATE;
     "int32", KWD_INT32;
     "int64", KWD_INT64;
+    "invalid", KWD_INVALID;
+    "land", KWD_LAND;
     "let", KWD_LET;
+    "local", KWD_LOCAL;
+    "loopify", KWD_LOOPIFY;
+    "lor", KWD_LOR;
+    "lxor", KWD_LXOR;
     "lsl", KWD_LSL;
     "lsr", KWD_LSR;
     "mutable", KWD_MUTABLE;
@@ -74,10 +84,12 @@ let keyword_table =
     "newer_version_of", KWD_NEWER_VERSION_OF;
     "noalloc", KWD_NOALLOC;
     "notrace", KWD_NOTRACE;
+    "of", KWD_OF;
     "pop", KWD_POP;
     "push", KWD_PUSH;
     "rec", KWD_REC;
     "rec_info", KWD_REC_INFO;
+    "region", KWD_REGION;
     "regular", KWD_REGULAR;
     "reraise", KWD_RERAISE;
     "set_of_closures", KWD_SET_OF_CLOSURES;
@@ -86,6 +98,8 @@ let keyword_table =
     "switch", KWD_SWITCH;
     "tag", KWD_TAG;
     "tagged", KWD_TAGGED;
+    "tailrec", KWD_TAILREC;
+    "toplevel", KWD_TOPLEVEL;
     "tupled", KWD_TUPLED;
     "unit", KWD_UNIT;
     "unreachable", KWD_UNREACHABLE;
@@ -94,6 +108,12 @@ let keyword_table =
     "val", KWD_VAL;
     "where", KWD_WHERE;
     "with", KWD_WITH;
+
+    (* Constructors for static constants *)
+    "Block", STATIC_CONST_BLOCK;
+    "Float_array", STATIC_CONST_FLOAT_ARRAY;
+    "Float_block", STATIC_CONST_FLOAT_BLOCK;
+    "Empty_array", STATIC_CONST_EMPTY_ARRAY;
 ]
 
 let ident_or_keyword str =
@@ -108,30 +128,47 @@ let prim_table =
     "array_length", PRIM_ARRAY_LENGTH;
     "array_load", PRIM_ARRAY_LOAD;
     "array_set", PRIM_ARRAY_SET;
+    "begin_region", PRIM_BEGIN_REGION;
+    "begin_ghost_region", PRIM_BEGIN_GHOST_REGION;
+    "begin_try_region", PRIM_BEGIN_TRY_REGION;
+    "begin_ghost_try_region", PRIM_BEGIN_GHOST_TRY_REGION;
+    "bigstring_load", PRIM_BIGSTRING_LOAD;
+    "bigstring_set", PRIM_BIGSTRING_SET;
     "Block", PRIM_BLOCK;
     "block_load", PRIM_BLOCK_LOAD;
+    "block_set", PRIM_BLOCK_SET;
+    "not", PRIM_BOOLEAN_NOT;
     "Box_float", PRIM_BOX_FLOAT;
     "Box_int32", PRIM_BOX_INT32;
     "Box_int64", PRIM_BOX_INT64;
     "Box_nativeint", PRIM_BOX_NATIVEINT;
     "bytes_length", PRIM_BYTES_LENGTH;
+    "bytes_load", PRIM_BYTES_LOAD;
+    "bytes_set", PRIM_BYTES_SET;
+    "end_region", PRIM_END_REGION;
+    "end_ghost_region", PRIM_END_GHOST_REGION;
+    "end_try_region", PRIM_END_TRY_REGION;
+    "end_ghost_try_region", PRIM_END_GHOST_TRY_REGION;
     "get_tag", PRIM_GET_TAG;
     "int_arith", PRIM_INT_ARITH;
     "int_comp", PRIM_INT_COMP;
     "int_shift", PRIM_INT_SHIFT;
+    "is_flat_float_array", PRIM_IS_FLAT_FLOAT_ARRAY;
     "is_int", PRIM_IS_INT;
     "num_conv", PRIM_NUM_CONV;
     "Opaque", PRIM_OPAQUE;
     "phys_eq", PRIM_PHYS_EQ;
     "phys_ne", PRIM_PHYS_NE;
-    "project_var", PRIM_PROJECT_VAR;
-    "select_closure", PRIM_SELECT_CLOSURE;
+    "project_value_slot", PRIM_PROJECT_VALUE_SLOT;
+    "project_function_slot", PRIM_PROJECT_FUNCTION_SLOT;
     "string_length", PRIM_STRING_LENGTH;
+    "string_load", PRIM_STRING_LOAD;
     "Tag_imm", PRIM_TAG_IMM;
     "unbox_float", PRIM_UNBOX_FLOAT;
     "unbox_int32", PRIM_UNBOX_INT32;
     "unbox_int64", PRIM_UNBOX_INT64;
     "unbox_nativeint", PRIM_UNBOX_NATIVEINT;
+    "unbox_vec128", PRIM_UNBOX_VEC128;
     "untag_imm", PRIM_UNTAG_IMM;
 ]
 
@@ -176,8 +213,9 @@ let oct_literal =
   '0' ['o' 'O'] ['0'-'7'] ['0'-'7' '_']*
 let bin_literal =
   '0' ['b' 'B'] ['0'-'1'] ['0'-'1' '_']*
+let sign = ['-']
 let int_literal =
-  decimal_literal | hex_literal | oct_literal | bin_literal
+  sign? (decimal_literal | hex_literal | oct_literal | bin_literal)
 let float_literal =
   ['0'-'9'] ['0'-'9' '_']*
   ('.' ['0'-'9' '_']* )?
@@ -217,6 +255,10 @@ rule token = parse
       { LPAREN }
   | ")"
       { RPAREN }
+  | "["
+      { LBRACK }
+  | "]"
+      { RBRACK }
   | "[|"
       { LBRACKPIPE }
   | "|]"
@@ -230,13 +272,14 @@ rule token = parse
   | ">"  { GREATER }
   | "<=" { LESSEQUAL }
   | ">=" { GREATEREQUAL }
+  | "<>" { NOTEQUAL }
   | "?"  { QMARK }
   | "+." { PLUSDOT }
   | "-." { MINUSDOT }
   | "*." { STARDOT }
   | "/." { SLASHDOT }
   | "=." { EQUALDOT }
-  | "!=." { NOTEQUALDOT }
+  | "<>." { NOTEQUALDOT }
   | "<." { LESSDOT }
   | "<=." { LESSEQUALDOT }
   | "?." { QMARKDOT }
@@ -245,6 +288,9 @@ rule token = parse
   | "@" { AT }
   | "|"  { PIPE }
   | "~"  { TILDE }
+  | "~-"  { TILDEMINUS }
+  | "&"  { AMP }
+  | "^"  { CARET }
   | "===>" { BIGARROW }
   | identstart identchar* as ident
          { ident_or_keyword ident }
@@ -266,7 +312,7 @@ rule token = parse
          { error ~lexbuf (Invalid_literal lit) }
   | '"' (([^ '"'] | '\\' '"')* as s) '"'
          (* CR-someday lmaurer: Escape sequences, multiline strings *)
-         { STRING s }
+         { STRING (Scanf.unescaped s) }
   | eof  { EOF }
   | _ as ch
          { error ~lexbuf (Illegal_character ch) }

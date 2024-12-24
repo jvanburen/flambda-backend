@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 (* [Simplify_import] cannot be used owing to a circular dependency. *)
 module EA = Continuation_extra_params_and_args.Extra_arg
 module EP = Flambda_primitive.Eligible_for_cse
@@ -29,38 +27,52 @@ module T = Flambda2_types
 module TE = Flambda2_types.Typing_env
 module List = ListLabels
 
-type t =
-  { by_scope : Simple.t EP.Map.t Scope.Map.t;
-    combined : Simple.t EP.Map.t
-  }
+module T0 : sig
+  type t = private
+    { by_scope : Simple.t EP.Map.t Scope.Map.t;
+      combined : Simple.t EP.Map.t
+    }
 
-let [@ocamlformat "disable"] print ppf { by_scope; combined; } =
-  Format.fprintf ppf "@[<hov 1>(\
-      @[<hov 1>(by_scope@ %a)@]@ \
-      @[<hov 1>(combined@ %a)@]\
-      @]"
-    (Scope.Map.print (EP.Map.print Simple.print)) by_scope
-    (EP.Map.print Simple.print) combined
+  val print : Format.formatter -> t -> unit
 
-let empty = { by_scope = Scope.Map.empty; combined = EP.Map.empty }
+  val empty : t
 
-let add t prim ~bound_to scope =
-  match EP.Map.find prim t.combined with
-  | exception Not_found ->
-    let level =
-      match Scope.Map.find scope t.by_scope with
-      | exception Not_found -> EP.Map.singleton prim bound_to
-      | level -> EP.Map.add prim bound_to level
-    in
-    let by_scope = Scope.Map.add (* replace *) scope level t.by_scope in
-    let combined = EP.Map.add prim bound_to t.combined in
-    { by_scope; combined }
-  | _bound_to -> t
+  val add : t -> EP.t -> bound_to:Simple.t -> Scope.t -> t
 
-let find t prim =
-  match EP.Map.find prim t.combined with
-  | exception Not_found -> None
-  | bound_to -> Some bound_to
+  val find : t -> EP.t -> Simple.t option
+end = struct
+  type t =
+    { by_scope : Simple.t EP.Map.t Scope.Map.t;
+      combined : Simple.t EP.Map.t
+    }
+
+  let [@ocamlformat "disable"] print ppf { by_scope; combined; } =
+    Format.fprintf ppf "@[<hov 1>(\
+        @[<hov 1>(by_scope@ %a)@]@ \
+        @[<hov 1>(combined@ %a)@]\
+        @]"
+      (Scope.Map.print (EP.Map.print Simple.print)) by_scope
+      (EP.Map.print Simple.print) combined
+
+  let empty = { by_scope = Scope.Map.empty; combined = EP.Map.empty }
+
+  let add t prim ~bound_to scope =
+    match EP.Map.find prim t.combined with
+    | exception Not_found ->
+      let level =
+        match Scope.Map.find scope t.by_scope with
+        | exception Not_found -> EP.Map.singleton prim bound_to
+        | level -> EP.Map.add prim bound_to level
+      in
+      let by_scope = Scope.Map.add (* replace *) scope level t.by_scope in
+      let combined = EP.Map.add prim bound_to t.combined in
+      { by_scope; combined }
+    | _bound_to -> t
+
+  let find t prim = EP.Map.find_opt prim t.combined
+end
+
+include T0
 
 module Rhs_kind : sig
   type t =
@@ -110,39 +122,59 @@ end
 
 let cse_with_eligible_lhs ~typing_env_at_fork ~cse_at_each_use ~params prev_cse
     (extra_bindings : EPA.t) extra_equations =
-  let params = BP.List.name_set params in
+  let params_set =
+    List.map params ~f:Bound_parameter.name |> Name.Set.of_list
+  in
+  let params = List.map params ~f:Bound_parameter.simple in
   let is_param simple =
     Simple.pattern_match simple
-      ~name:(fun name ~coercion:_ -> Name.Set.mem name params)
+      ~name:(fun name ~coercion:_ -> Name.Set.mem name params_set)
       ~const:(fun _ -> false)
   in
   List.fold_left cse_at_each_use ~init:EP.Map.empty
     ~f:(fun eligible (env_at_use, id, cse) ->
       let find_new_name =
-        if EPA.is_empty extra_bindings
-        then fun _arg -> None
-        else
-          let extra_args = RI.Map.find id extra_bindings.extra_args in
-          let rec find_name simple params args =
-            match args, params with
-            | [], [] -> None
-            | [], _ | _, [] ->
-              Misc.fatal_error "Mismatching params and args arity"
-            | arg :: args, param :: params -> begin
-              match (arg : EA.t) with
-              | Already_in_scope arg when Simple.equal arg simple ->
-                (* If [param] has an extra equation associated to it, we
-                   shouldn't propagate equations on it as it will mess with the
-                   application of constraints later *)
-                if Name.Map.mem (BP.name param) extra_equations
-                then None
-                else Some (BP.simple param)
-              | Already_in_scope _ | New_let_binding _
-              | New_let_binding_with_named_args _ ->
-                find_name simple params args
-            end
-          in
-          fun arg -> find_name arg extra_bindings.extra_params extra_args
+        let find_param simple params =
+          List.find_opt
+            ~f:(fun param ->
+              match
+                TE.get_canonical_simple_exn env_at_use param
+                  ~min_name_mode:NM.normal
+                  ~name_mode_of_existing_simple:NM.normal
+              with
+              | exception Not_found -> false
+              | arg -> Simple.equal arg simple)
+            params
+        in
+        match (extra_bindings : EPA.t) with
+        | Empty -> fun arg -> find_param arg params
+        | Non_empty { extra_args; extra_params } -> (
+          match RI.Map.find id extra_args with
+          | Invalid -> fun _arg -> None
+          | Ok extra_args -> (
+            let rec find_name simple params args =
+              match args, params with
+              | [], [] -> None
+              | [], _ | _, [] ->
+                Misc.fatal_error "Mismatching params and args arity"
+              | arg :: args, param :: params -> (
+                match (arg : EA.t) with
+                | Already_in_scope arg when Simple.equal arg simple ->
+                  (* If [param] has an extra equation associated to it, we
+                     shouldn't propagate equations on it as it will mess with
+                     the application of constraints later *)
+                  if Name.Map.mem (BP.name param) extra_equations
+                  then None
+                  else Some (BP.simple param)
+                | Already_in_scope _ | New_let_binding _
+                | New_let_binding_with_named_args _ ->
+                  find_name simple params args)
+            in
+            fun arg ->
+              match find_param arg params with
+              | None ->
+                find_name arg (Bound_parameters.to_list extra_params) extra_args
+              | Some _ as r -> r))
       in
       EP.Map.fold
         (fun prim bound_to eligible ->
@@ -154,14 +186,13 @@ let cse_with_eligible_lhs ~typing_env_at_fork ~cse_at_each_use ~params prev_cse
                     ~name_mode_of_existing_simple:NM.normal
                 with
                 | exception Not_found -> None
-                | arg -> begin
+                | arg -> (
                   match find_new_name arg with
                   | None ->
                     if TE.mem_simple typing_env_at_fork arg
                     then Some arg
                     else None
-                  | Some _ as arg_opt -> arg_opt
-                end)
+                  | Some _ as arg_opt -> arg_opt))
           in
           match prim with
           | None -> eligible
@@ -229,21 +260,27 @@ let join_one_cse_equation ~cse_at_each_use prim bound_to_map
       let prim_result_kind = P.result_kind' (EP.to_primitive prim) in
       let var = Variable.create "cse_param" in
       let extra_param =
-        BP.create var (K.With_subkind.create prim_result_kind Anything)
+        BP.create var (K.With_subkind.anything prim_result_kind)
       in
       let bound_to = RI.Map.map Rhs_kind.bound_to bound_to_map in
       let cse = EP.Map.add prim (Simple.var var) cse in
       let extra_args =
         RI.Map.map (fun simple : EA.t -> Already_in_scope simple) bound_to
       in
-      let extra_bindings = EPA.add extra_bindings ~extra_param ~extra_args in
+      let extra_bindings =
+        EPA.add extra_bindings ~extra_param ~extra_args
+          ~invalids:Apply_cont_rewrite_id.Set.empty
+      in
       let extra_equations =
         (* For the primitives Is_int and Get_tag, they're strongly linked to
            their argument: additional information on the cse parameter should
            translate into additional information on the argument. This can be
-           done by giving them the appropriate type. *)
-        match EP.to_primitive prim with
-        | Unary (Is_int, scrutinee) ->
+           done by giving them the appropriate type. The same could be done for
+           a lot of the other non-arithmetic primitives, but in the other cases
+           the join of the types will usually give us the relevant equation
+           anyway. *)
+        match[@ocaml.warning "-fragile-match"] EP.to_primitive prim with
+        | Unary (Is_int { variant_only = true }, scrutinee) ->
           Name.Map.add (Name.var var)
             (T.is_int_for_scrutinee ~scrutinee)
             extra_equations
@@ -258,12 +295,27 @@ let join_one_cse_equation ~cse_at_each_use prim bound_to_map
       in
       cse, extra_bindings, extra_equations, allowed
 
-let cut_cse_environment { by_scope; _ } ~scope_at_fork =
+let cut_cse_environment ({ by_scope; _ } as t) ~scope_at_fork =
   (* This extracts those CSE equations that arose between the fork point and
      each use of the continuation in question. *)
   let _, _, levels = Scope.Map.split scope_at_fork by_scope in
   Scope.Map.fold
-    (fun _scope equations result -> EP.Map.disjoint_union equations result)
+    (fun scope equations result ->
+      try EP.Map.disjoint_union equations result
+      with Invalid_argument _ as exn ->
+        Format.eprintf
+          "cut_cse_environment failed:@ \n\
+           t = %a@ \n\
+           scope_at_fork = %a@ \n\
+           scope = %a@ \n\
+           equations = %a@ \n\
+           result=%a@ \n\n"
+          print t Scope.print scope_at_fork Scope.print scope
+          (EP.Map.print Simple.print)
+          equations
+          (EP.Map.print Simple.print)
+          result;
+        raise exn)
     levels EP.Map.empty
 
 module Join_result = struct
@@ -279,6 +331,7 @@ end
 
 let join0 ~typing_env_at_fork ~cse_at_fork ~cse_at_each_use ~params
     ~scope_at_fork =
+  let params = Bound_parameters.to_list params in
   (* CSE equations have a left-hand side specifying a primitive and a right-hand
      side specifying a [Simple]. The left-hand side is matched against portions
      of terms. As such, the [Simple]s therein must have name mode [Normal],
@@ -311,7 +364,9 @@ let join0 ~typing_env_at_fork ~cse_at_fork ~cse_at_each_use ~params
       not (EPA.is_empty extra_params')
     in
     let cse = EP.Map.disjoint_union prev_cse cse' in
-    let extra_params = EPA.concat extra_params' extra_params in
+    (* The order of cse arguments does not matter since only simples already in
+       scope are used as extra arguments. *)
+    let extra_params = EPA.concat ~outer:extra_params' ~inner:extra_params in
     let extra_equations =
       Name.Map.disjoint_union extra_equations extra_equations'
     in
@@ -350,10 +405,9 @@ let join0 ~typing_env_at_fork ~cse_at_fork ~cse_at_each_use ~params
         in
         if not propagate
         then cse
-        else begin
+        else (
           have_propagated_something := true;
-          add cse prim ~bound_to (Scope.next scope_at_fork)
-        end)
+          add cse prim ~bound_to (Scope.next scope_at_fork)))
       cse cse_at_fork
   in
   if not !have_propagated_something
@@ -369,16 +423,17 @@ let join0 ~typing_env_at_fork ~cse_at_fork ~cse_at_each_use ~params
 let join ~typing_env_at_fork ~cse_at_fork ~use_info ~get_typing_env
     ~get_rewrite_id ~get_cse ~params =
   let scope_at_fork = TE.current_scope typing_env_at_fork in
-  let seen_equations = ref false in
+  let no_equations = ref false in
   let cse_at_each_use =
     List.map use_info ~f:(fun use ->
         let t = get_cse use in
         let cse_between_fork_and_use = cut_cse_environment t ~scope_at_fork in
-        if not (EP.Map.is_empty cse_between_fork_and_use)
-        then seen_equations := true;
+        (* If one branch doesn't have any equations, then the join is going to
+           be empty *)
+        if EP.Map.is_empty cse_between_fork_and_use then no_equations := true;
         get_typing_env use, get_rewrite_id use, cse_between_fork_and_use)
   in
-  if not !seen_equations
+  if !no_equations
   then None
   else
     join0 ~typing_env_at_fork ~cse_at_fork ~cse_at_each_use ~params

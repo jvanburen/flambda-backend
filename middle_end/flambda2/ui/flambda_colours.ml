@@ -12,85 +12,154 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
+(* Whether to output an up arrow on push and a down arrow on pop. Handy for
+   hunting down mismatched pushes and pops. *)
+let debug_push_and_pop = false
 
-let colour_enabled =
-  lazy
-    ((* This avoids having to alter misc.ml *)
-     let buf = Buffer.create 10 in
-     let ppf = Format.formatter_of_buffer buf in
-     Misc.Color.set_color_tag_handling ppf;
-     Format.fprintf ppf "@{<error>@}%!";
-     String.length (Buffer.contents buf) > 0)
+type directive = Format.formatter -> unit
 
-let normal () = if Lazy.force colour_enabled then "\x1b[0m" else ""
+let disable_colours = ref false
 
-let fg_256 n =
-  if Lazy.force colour_enabled then Printf.sprintf "\x1b[38;5;%d;1m" n else ""
+let is_colour_enabled =
+  let colour_enabled =
+    lazy
+      ((* This avoids having to alter misc.ml *)
+       let buf = Buffer.create 10 in
+       let ppf = Format.formatter_of_buffer buf in
+       Misc.Style.set_tag_handling ppf;
+       Format.fprintf ppf "@{<error>@}%!";
+       String.length (Buffer.contents buf) > 0)
+  in
+  fun () -> Lazy.force colour_enabled && not !disable_colours
 
-let bg_256 n =
-  if Lazy.force colour_enabled then Printf.sprintf "\x1b[48;5;%d;1m" n else ""
+let without_colours ~f =
+  let tmp = !disable_colours in
+  disable_colours := true;
+  let res = f () in
+  disable_colours := tmp;
+  res
 
-let prim_constructive () = fg_256 163
+type state =
+  { fg : int option;
+    bg : int option
+  }
 
-let prim_destructive () = fg_256 62
+let initial_state = { fg = None; bg = None }
 
-let prim_neither () = fg_256 130
+let state_stack =
+  (* Instead of an actual empty stack, we start with the initial state on top,
+     since this makes [push] and [pop] simpler. *)
+  ref [initial_state]
 
-let naked_number () = fg_256 70
+let output ppf str =
+  if is_colour_enabled () then Format.fprintf ppf "@<0>%s" str
 
-let tagged_immediate () = fg_256 70
+let sequence command_code arg =
+  Printf.sprintf "\x1b[%d;5;%d;1m" command_code arg
 
-let constructor () = fg_256 69
+let fg_256 n ppf = output ppf (sequence 38 n)
 
-let kind () = fg_256 37
+let bg_256 n ppf = output ppf (sequence 48 n)
 
-let subkind () = fg_256 39
+let reset_out ppf = output ppf "\x1b[0m"
 
-let top_or_bottom_type () = fg_256 37
+let render_state state ppf =
+  reset_out ppf;
+  Option.iter (fun fg -> fg_256 fg ppf) state.fg;
+  Option.iter (fun bg -> bg_256 bg ppf) state.bg
 
-let debuginfo () = fg_256 243
+let pop ppf =
+  match !state_stack with
+  | [] | [_] -> Misc.fatal_error "Flambda_colours.pop: too many pops"
+  | _ :: (top_state :: _ as states) ->
+    state_stack := states;
+    render_state top_state ppf;
+    if debug_push_and_pop then output ppf "\u{2193}"
 
-let discriminant () = fg_256 111
+let push ?fg ?bg ppf =
+  let current_state =
+    match !state_stack with
+    | [] -> Misc.fatal_error "Flambda_colours.push_modified: empty stack"
+    | state :: _ -> state
+  in
+  let update new_value old_value =
+    match new_value with None -> old_value | Some _ -> new_value
+  in
+  let new_state =
+    { fg = update fg current_state.fg; bg = update bg current_state.bg }
+  in
+  state_stack := new_state :: !state_stack;
+  render_state new_state ppf;
+  if debug_push_and_pop then output ppf "\u{2191}"
 
-let name () = fg_256 111
+let none ppf = push ppf
 
-let parameter () = fg_256 198
+let prim_constructive ppf = push ~fg:163 ppf
 
-let symbol () = fg_256 98
+let prim_destructive ppf = push ~fg:62 ppf
 
-let variable () = fg_256 111
+let prim_neither ppf = push ~fg:130 ppf
 
-let closure_element () = fg_256 31
+let naked_number ppf = push ~fg:70 ppf
 
-let closure_var () = fg_256 43
+let unboxed_product ppf = push ~fg:198 ppf
 
-let code_id () = fg_256 169
+let tagged_immediate ppf = push ~fg:70 ppf
 
-let expr_keyword () = fg_256 51
+let constructor ppf = push ~fg:69 ppf
 
-let static_keyword () = fg_256 255 ^ bg_256 240
+let kind ppf = push ~fg:37 ppf
 
-let static_part () = fg_256 255 ^ bg_256 237
+let subkind ppf = push ~fg:39 ppf
 
-let continuation () = fg_256 35
+let top_or_bottom_type ppf = push ~fg:37 ppf
 
-let continuation_definition () = bg_256 237
+let debuginfo ppf = push ~fg:243 ppf
 
-let continuation_annotation () = fg_256 202 ^ bg_256 237
+let discriminant ppf = push ~fg:111 ppf
 
-let name_abstraction () = fg_256 172
+let name ppf = push ~fg:111 ppf
 
-let rec_info () = fg_256 249
+let parameter ppf = push ~fg:198 ppf
 
-let coercion () = fg_256 249
+let symbol ppf = push ~fg:98 ppf
 
-let depth_variable () = fg_256 214
+let variable ppf = push ~fg:111 ppf
 
-let error () = fg_256 160
+let function_slot ppf = push ~fg:31 ppf
 
-let elide () = fg_256 243
+let value_slot ppf = push ~fg:43 ppf
 
-let each_file () = fg_256 51
+let code_id ppf = push ~fg:169 ppf
 
-let lambda () = expr_keyword ()
+let expr_keyword ppf = push ~fg:51 ppf
+
+let invalid_keyword ppf = push ~fg:255 ~bg:160 ppf
+
+let static_keyword ppf = push ~fg:255 ~bg:240 ppf
+
+let static_part ppf = push ~fg:255 ~bg:237 ppf
+
+let continuation ppf = push ~fg:35 ppf
+
+let continuation_definition ppf = push ~bg:237 ppf
+
+let continuation_annotation ppf = push ~fg:202 ~bg:237 ppf
+
+let name_abstraction ppf = push ~fg:172 ppf
+
+let rec_info ppf = push ~fg:249 ppf
+
+let coercion ppf = push ~fg:249 ppf
+
+let depth_variable ppf = push ~fg:214 ppf
+
+let error ppf = push ~fg:160 ppf
+
+let elide ppf = push ~fg:243 ppf
+
+let each_file ppf = push ~fg:51 ppf
+
+let lambda = expr_keyword
+
+let effect ppf = push ~fg:46 ppf

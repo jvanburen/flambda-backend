@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 type t =
   | Not_yet_decided
   | Never_inline_attribute
@@ -39,6 +37,8 @@ val print : Format.formatter -> t -> unit
 val report : Format.formatter -> t -> unit
 
 val must_be_inlined : t -> bool
+
+val has_attribute_inline : t -> bool
 
 val cannot_be_inlined : t -> bool
 

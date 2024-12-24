@@ -24,14 +24,10 @@
     If you're looking for the full grammar of the Flambda type system please go
     to type_grammar.mli instead. *)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 type 'head t
 
 val print :
   print_head:(Format.formatter -> 'head -> unit) ->
-  apply_renaming_head:('head -> Renaming.t -> 'head) ->
-  free_names_head:('head -> Name_occurrences.t) ->
   Format.formatter ->
   'head t ->
   unit
@@ -48,43 +44,48 @@ val is_obviously_bottom : _ t -> bool
 
 val is_obviously_unknown : _ t -> bool
 
-val get_alias_exn :
-  apply_renaming_head:('head -> Renaming.t -> 'head) ->
-  free_names_head:('head -> Name_occurrences.t) ->
-  'head t ->
-  Simple.t
+val get_alias_exn : 'head t -> Simple.t
 
 val apply_coercion :
   apply_coercion_head:('head -> Coercion.t -> 'head Or_bottom.t) ->
-  apply_renaming_head:('head -> Renaming.t -> 'head) ->
-  free_names_head:('head -> Name_occurrences.t) ->
   Coercion.t ->
   'head t ->
   'head t Or_bottom.t
 
-val apply_renaming : 'head t -> Renaming.t -> 'head t
-
-val free_names :
+val apply_renaming :
   apply_renaming_head:('head -> Renaming.t -> 'head) ->
   free_names_head:('head -> Name_occurrences.t) ->
   'head t ->
-  Name_occurrences.t
-
-val remove_unused_closure_vars :
-  apply_renaming_head:('head -> Renaming.t -> 'head) ->
-  free_names_head:('head -> Name_occurrences.t) ->
-  remove_unused_closure_vars_head:
-    ('head -> used_closure_vars:Var_within_closure.Set.t -> 'head) ->
-  'head t ->
-  used_closure_vars:Var_within_closure.Set.t ->
+  Renaming.t ->
   'head t
 
-val all_ids_for_export :
-  apply_renaming_head:('head -> Renaming.t -> 'head) ->
-  free_names_head:('head -> Name_occurrences.t) ->
-  all_ids_for_export_head:('head -> Ids_for_export.t) ->
+val free_names :
+  free_names_head:('head -> Name_occurrences.t) -> 'head t -> Name_occurrences.t
+
+val free_names_no_cache :
+  free_names_head:('head -> Name_occurrences.t) -> 'head t -> Name_occurrences.t
+
+val remove_unused_value_slots_and_shortcut_aliases :
+  remove_unused_value_slots_and_shortcut_aliases_head:
+    ('head ->
+    used_value_slots:Value_slot.Set.t ->
+    canonicalise:(Simple.t -> Simple.t) ->
+    'head) ->
   'head t ->
-  Ids_for_export.t
+  used_value_slots:Value_slot.Set.t ->
+  canonicalise:(Simple.t -> Simple.t) ->
+  'head t
+
+val project_variables_out :
+  free_names_head:('head -> Name_occurrences.t) ->
+  to_project:Variable.Set.t ->
+  expand:(Variable.t -> coercion:Coercion.t -> 'head t) ->
+  project_head:('head -> 'head) ->
+  'head t ->
+  'head t
+
+val ids_for_export :
+  ids_for_export_head:('head -> Ids_for_export.t) -> 'head t -> Ids_for_export.t
 
 module Descr : sig
   type 'head t = private
@@ -109,8 +110,4 @@ module Descr : sig
     Name_occurrences.t
 end
 
-val descr :
-  apply_renaming_head:('head -> Renaming.t -> 'head) ->
-  free_names_head:('head -> Name_occurrences.t) ->
-  'head t ->
-  'head Descr.t Or_unknown_or_bottom.t
+val descr : 'head t -> 'head Descr.t Or_unknown_or_bottom.t

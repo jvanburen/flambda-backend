@@ -17,13 +17,17 @@
 module Acc = Closure_conversion_aux.Acc
 module Expr_with_acc = Closure_conversion_aux.Expr_with_acc
 
+val check_float_array_optimisation_enabled : string -> unit
+
 val convert_and_bind :
   Acc.t ->
   big_endian:bool ->
   Exn_continuation.t option ->
-  register_const_string:(Acc.t -> string -> Acc.t * Symbol.t) ->
+  register_const0:(Acc.t -> Static_const.t -> string -> Acc.t * Symbol.t) ->
   Lambda.primitive ->
-  args:Simple.t list ->
+  args:Simple.t list list ->
   Debuginfo.t ->
-  (Acc.t -> Flambda.Named.t option -> Acc.t * Expr_with_acc.t) ->
-  Acc.t * Expr_with_acc.t
+  current_region:Variable.t ->
+  current_ghost_region:Variable.t ->
+  (Acc.t -> Flambda.Named.t list -> Expr_with_acc.t) ->
+  Expr_with_acc.t

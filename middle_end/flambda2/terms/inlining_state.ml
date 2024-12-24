@@ -14,14 +14,12 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 type t =
   { arguments : Inlining_arguments.t;
     depth : int
   }
 
-let increment_depth t = { t with depth = t.depth + 1 }
+let increment_depth t ~by = { t with depth = t.depth + by }
 
 let default ~round = { arguments = Inlining_arguments.create ~round; depth = 0 }
 
@@ -40,6 +38,8 @@ let is_depth_exceeded t =
   t.depth >= Inlining_arguments.max_inlining_depth t.arguments
 
 let meet t1 t2 =
+  (* XXX is this depth calculation wrong? doesn't seem like a meet Or maybe this
+     should be renamed to "combine" or something *)
   { depth = t1.depth + t2.depth;
     arguments = Inlining_arguments.meet t1.arguments t2.arguments
   }

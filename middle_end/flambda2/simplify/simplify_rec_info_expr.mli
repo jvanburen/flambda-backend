@@ -16,8 +16,6 @@
 
 (** Simplification functions on [Rec_info_expr.t]. *)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 val simplify_rec_info_expr :
   Downwards_acc.t -> Rec_info_expr.t -> Rec_info_expr.t
 
@@ -33,7 +31,7 @@ end
 val evaluate_rec_info_expr :
   Downwards_acc.t -> Rec_info_expr.t -> Evaluated_rec_info_expr.t
 
-val depth_may_be_at_least : Downwards_acc.t -> Rec_info_expr.t -> int -> bool
+val depth_may_exceed : Downwards_acc.t -> Rec_info_expr.t -> int -> bool
 
 val known_remaining_unrolling_depth :
   Downwards_acc.t -> Rec_info_expr.t -> int option

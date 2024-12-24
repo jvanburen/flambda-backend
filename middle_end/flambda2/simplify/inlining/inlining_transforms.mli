@@ -14,13 +14,12 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 open! Flambda.Import
 
 val inline :
   Downwards_acc.t ->
   apply:Apply.t ->
   unroll_to:int option ->
+  was_inline_always:bool ->
   Flambda2_types.Function_type.t ->
   Downwards_acc.t * Expr.t

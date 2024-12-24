@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 module DE = Downwards_env
 module T = Flambda2_types
 
@@ -28,10 +26,12 @@ type t =
 
 let create kind ~env_at_use:env id ~arg_types = { id; kind; arg_types; env }
 
-let [@ocamlformat "disable"] print ppf { env = _; id = _; kind = _; arg_types; } =
+let [@ocamlformat "disable"] print ppf { env = _; id; kind = _; arg_types; } =
   Format.fprintf ppf "@[<hov 1>(\
+      @[<hov 1>(id %a)@]@ \
       @[<hov 1>(arg_types@ %a)@]@ \
       )@]"
+    Apply_cont_rewrite_id.print id
     (Format.pp_print_list ~pp_sep:Format.pp_print_space Flambda2_types.print)
     arg_types
 
@@ -42,3 +42,8 @@ let use_kind t = t.kind
 let arg_types t = t.arg_types
 
 let env_at_use t = t.env
+
+let mark_non_inlinable t =
+  match t.kind with
+  | Inlinable -> { t with kind = Non_inlinable { escaping = false } }
+  | Non_inlinable _ -> t

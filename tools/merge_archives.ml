@@ -23,7 +23,7 @@ let merge_cma ~target ~archives =
   Clflags.all_ccopts := [];
   Clflags.dllibs := [];
   List.iter
-    (fun archive -> Load_path.add_dir (Filename.dirname archive))
+    (fun archive -> Load_path.add_dir ~hidden:false (Filename.dirname archive))
     archives;
   let error reporter err =
     Format.eprintf "Error whilst merging .cma files:@ %a\n%!" reporter err;
@@ -58,30 +58,88 @@ let merge_cmxa0 ~archives =
     | _ :: _ -> failwith "Archives do not agree on the .cmxa magic number"
     | [] -> assert false
   in
+  let ncmxs = ref 0 and ncmis = ref 0 in
+  let cmi_table = Hashtbl.create 42 in
+  let cmx_table = Hashtbl.create 42 in
+  cmxa_list
+  |> List.iter (fun (lib : Cmx_format.library_infos) ->
+         lib.lib_imports_cmi
+         |> Array.iter (fun import ->
+                let name = Import_info.name import in
+                if not (Hashtbl.mem cmi_table name)
+                then begin
+                  Hashtbl.add cmi_table name (import, !ncmis);
+                  incr ncmis
+                end);
+         lib.lib_imports_cmx
+         |> Array.iter (fun import ->
+                let cu = Import_info.cu import in
+                if not (Hashtbl.mem cmx_table cu)
+                then begin
+                  Hashtbl.add cmx_table cu (import, !ncmxs);
+                  incr ncmxs
+                end));
+  let cmis = Array.make !ncmis Import_info.dummy in
+  Hashtbl.iter (fun _name (import, i) -> cmis.(i) <- import) cmi_table;
+  let cmxs = Array.make !ncmxs Import_info.dummy in
+  Hashtbl.iter (fun _name (import, i) -> cmxs.(i) <- import) cmx_table;
+  let genfns = Generic_fns.Tbl.make () in
   let _, lib_units, lib_ccobjs, lib_ccopts =
     List.fold_left
       (fun (lib_names, lib_units, lib_ccobjs, lib_ccopts)
            (cmxa : Cmx_format.library_infos) ->
         let new_lib_names =
           List.map
-            (fun ((cmx : Cmx_format.unit_infos), _) -> cmx.ui_name)
+            (fun (cmx : Cmx_format.lib_unit_info) -> cmx.li_name)
             cmxa.lib_units
-          |> String_set.of_list
+          |> Compilation_unit.Set.of_list
         in
-        let already_defined = String_set.inter new_lib_names lib_names in
-        if not (String_set.is_empty already_defined)
+        let already_defined =
+          Compilation_unit.Set.inter new_lib_names lib_names
+        in
+        if not (Compilation_unit.Set.is_empty already_defined)
         then failwith "Archives contain multiply-defined units";
-        let lib_names = String_set.union new_lib_names lib_names in
-        let lib_units = lib_units @ cmxa.lib_units in
+        ignore(Generic_fns.Tbl.add
+                ~imports:Generic_fns.Partition.Set.empty
+                genfns cmxa.lib_generic_fns);
+        let lib_names = Compilation_unit.Set.union new_lib_names lib_names in
+        let remap oldarr newarr tbl oldb ~get_key =
+          let module B = Misc.Bitmap in
+          let b = B.make (Array.length newarr) in
+          oldb
+          |> B.iter (fun i ->
+                 B.set b (snd (Hashtbl.find tbl (get_key oldarr.(i)))));
+          b
+        in
+        let new_units =
+          List.map
+            (fun (li : Cmx_format.lib_unit_info) ->
+              { li with
+                li_imports_cmi =
+                  remap cmxa.lib_imports_cmi cmis cmi_table li.li_imports_cmi
+                    ~get_key:Import_info.name;
+                li_imports_cmx =
+                  remap cmxa.lib_imports_cmx cmxs cmx_table li.li_imports_cmx
+                    ~get_key:Import_info.cu
+              })
+            cmxa.lib_units
+        in
+        let lib_units = lib_units @ new_units in
         let cmxa_lib_ccobjs = String_set.of_list cmxa.lib_ccobjs in
         let lib_ccobjs = String_set.union cmxa_lib_ccobjs lib_ccobjs in
         let lib_ccopts = lib_ccopts @ cmxa.lib_ccopts in
         lib_names, lib_units, lib_ccobjs, lib_ccopts)
-      (String_set.empty, [], String_set.empty, [])
+      (Compilation_unit.Set.empty, [], String_set.empty, [])
       cmxa_list
   in
   let cmxa : Cmx_format.library_infos =
-    { lib_units; lib_ccobjs = String_set.elements lib_ccobjs; lib_ccopts }
+    { lib_units;
+      lib_ccobjs = String_set.elements lib_ccobjs;
+      lib_ccopts;
+      lib_imports_cmi = cmis;
+      lib_imports_cmx = cmxs;
+      lib_generic_fns = Generic_fns.Tbl.entries genfns
+    }
   in
   magic, cmxa
 

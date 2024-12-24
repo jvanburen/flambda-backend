@@ -15,6 +15,30 @@
 
 open Cmm
 
+type irc_work_list =
+  | Unknown_list
+  | Precolored
+  | Initial
+  | Simplify
+  | Freeze
+  | Spill
+  | Spilled
+  | Coalesced
+  | Colored
+  | Select_stack
+
+let string_of_irc_work_list = function
+  | Unknown_list -> "unknown_list"
+  | Precolored -> "precolored"
+  | Initial -> "initial"
+  | Simplify -> "simplify"
+  | Freeze -> "freeze"
+  | Spill -> "spill"
+  | Spilled -> "spilled"
+  | Coalesced -> "coalesced"
+  | Colored -> "colored"
+  | Select_stack -> "select_stack"
+
 module V = Backend_var
 
 module Raw_name = struct
@@ -39,6 +63,9 @@ type t =
     stamp: int;
     typ: Cmm.machtype_component;
     mutable loc: location;
+    mutable irc_work_list: irc_work_list;
+    mutable irc_color : int option;
+    mutable irc_alias : t option;
     mutable spill: bool;
     mutable part: int option;
     mutable interf: t list;
@@ -56,11 +83,13 @@ and stack_location =
     Local of int
   | Incoming of int
   | Outgoing of int
+  | Domainstate of int
 
 type reg = t
 
 let dummy =
   { raw_name = Raw_name.Anon; stamp = 0; typ = Int; loc = Unknown;
+    irc_work_list = Unknown_list; irc_color = None; irc_alias = None;
     spill = false; interf = []; prefer = []; degree = 0; spill_cost = 0;
     visited = 0; part = None;
   }
@@ -86,7 +115,9 @@ let clear_visited_marks () =
 
 let create ty =
   let r = { raw_name = Raw_name.Anon; stamp = !currstamp; typ = ty;
-            loc = Unknown; spill = false; interf = []; prefer = []; degree = 0;
+            loc = Unknown;
+            irc_work_list = Unknown_list; irc_color = None; irc_alias = None;
+            spill = false; interf = []; prefer = []; degree = 0;
             spill_cost = 0; visited = unvisited; part = None; } in
   reg_list := r :: !reg_list;
   incr currstamp;
@@ -111,6 +142,7 @@ let clone r =
 
 let at_location ty loc =
   let r = { raw_name = Raw_name.R; stamp = !currstamp; typ = ty; loc;
+            irc_work_list = Unknown_list; irc_color = None; irc_alias = None;
             spill = false; interf = []; prefer = []; degree = 0;
             spill_cost = 0; visited = unvisited; part = None; } in
   hw_reg_list := r :: !hw_reg_list;
@@ -124,6 +156,16 @@ let anonymous t =
   match Raw_name.to_string t.raw_name with
   | None -> true
   | Some _raw_name -> false
+
+let is_preassigned t =
+  match t.raw_name with
+  | R -> true
+  | Anon | Var _ -> false
+
+let is_unknown t =
+  match t.loc with
+  | Unknown -> true
+  | Reg _ | Stack (Local _ | Incoming _ | Outgoing _ | Domainstate _) -> false
 
 let name t =
   match Raw_name.to_string t.raw_name with
@@ -153,7 +195,11 @@ let is_reg t =
 
 let size_of_contents_in_bytes t =
   match t.typ with
+  | Vec128 -> Arch.size_vec128
   | Float -> Arch.size_float
+  | Float32 ->
+    assert (Arch.size_float = 8);
+    Arch.size_float / 2
   | Addr ->
     assert (Arch.size_addr = Arch.size_int);
     Arch.size_addr
@@ -179,6 +225,9 @@ let num_registers() = !currstamp
 
 let reinit_reg r =
   r.loc <- Unknown;
+  r.irc_work_list <- Unknown_list;
+  r.irc_color <- None;
+  r.irc_alias <- None;
   r.interf <- [];
   r.prefer <- [];
   r.degree <- 0;
@@ -198,6 +247,11 @@ module RegOrder =
 
 module Set = Set.Make(RegOrder)
 module Map = Map.Make(RegOrder)
+module Tbl = Hashtbl.Make (struct
+    type t = reg
+    let equal r1 r2 = r1.stamp = r2.stamp
+    let hash r = r.stamp
+  end)
 
 let add_set_array s v =
   match Array.length v with
@@ -245,14 +299,25 @@ let set_of_array v =
            if i >= n then Set.empty else Set.add v.(i) (add_all(i+1))
          in add_all 0
 
+let set_has_collisions s =
+  let phys_regs = Hashtbl.create (Int.min (Set.cardinal s) 32) in
+  Set.fold (fun r acc ->
+    match r.loc with
+    | Reg id ->
+      if Hashtbl.mem phys_regs id then true
+      else (Hashtbl.add phys_regs id (); acc)
+    | Unknown | Stack _ -> acc) s false
+
 let equal_stack_location left right =
   match left, right with
   | Local left, Local right -> Int.equal left right
   | Incoming left, Incoming right -> Int.equal left right
   | Outgoing left, Outgoing right -> Int.equal left right
-  | Local _, (Incoming _ | Outgoing _)
-  | Incoming _, (Local _ | Outgoing _)
-  | Outgoing _, (Local _ | Incoming _) ->
+  | Domainstate left, Domainstate right -> Int.equal left right
+  | Local _, (Incoming _ | Outgoing _ | Domainstate _)
+  | Incoming _, (Local _ | Outgoing _ | Domainstate _)
+  | Outgoing _, (Local _ | Incoming _ | Domainstate _)
+  | Domainstate _, (Local _ | Incoming _ | Outgoing _)->
     false
 
 let equal_location left right =
@@ -265,5 +330,31 @@ let equal_location left right =
   | Stack _, (Unknown | Reg _) ->
     false
 
+let same_phys_reg left right =
+  match left.loc, right.loc with
+  | Reg l, Reg r -> Int.equal l r
+  | (Reg _ | Unknown | Stack _), _ -> false
+
 let same_loc left right =
+  (* CR-soon azewierzejew: This should also compare [reg_class] for [Stack
+     (Local _)]. That's complicated because [reg_class] is definied in [Proc]
+     which relies on [Reg]. *)
   equal_location left.loc right.loc
+
+let same left right =
+  Int.equal left.stamp right.stamp
+
+let compare left right =
+  Int.compare left.stamp right.stamp
+
+(* Two registers have compatible types if we allow moves between them.
+   Note that we never allow moves between different register classes, so this
+   condition must be at least as strict as [class left = class right]. *)
+let types_are_compatible left right =
+  match left.typ, right.typ with
+  | (Int | Val | Addr), (Int | Val | Addr)
+  | Float, Float
+  | Float32, Float32
+  | Vec128, Vec128 ->
+    true
+  | (Int | Val | Addr | Float | Float32 | Vec128), _ -> false

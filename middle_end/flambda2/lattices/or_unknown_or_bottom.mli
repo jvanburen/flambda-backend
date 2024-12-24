@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 type 'a t =
   | Unknown
   | Ok of 'a
@@ -30,8 +28,6 @@ val bind : 'a t -> f:('a -> 'b t) -> 'b t
 val map : 'a t -> f:('a -> 'b) -> 'b t
 
 val map_sharing : 'a t -> f:('a -> 'a) -> 'a t
-
-val of_or_unknown : 'a Or_unknown.t -> 'a t
 
 module Let_syntax : sig
   val ( let<>* ) : 'a t -> ('a -> 'b t) -> 'b t

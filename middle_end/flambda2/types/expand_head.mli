@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 (** Functions involving the expansion of any [Alias] type at the outermost level
     of a type. *)
 
@@ -26,6 +24,8 @@ module Expanded_type : sig
 
   val create_naked_immediate : Type_grammar.head_of_kind_naked_immediate -> t
 
+  val create_naked_float32 : Type_grammar.head_of_kind_naked_float32 -> t
+
   val create_naked_float : Type_grammar.head_of_kind_naked_float -> t
 
   val create_naked_int32 : Type_grammar.head_of_kind_naked_int32 -> t
@@ -34,7 +34,11 @@ module Expanded_type : sig
 
   val create_naked_nativeint : Type_grammar.head_of_kind_naked_nativeint -> t
 
+  val create_naked_vec128 : Type_grammar.head_of_kind_naked_vec128 -> t
+
   val create_rec_info : Type_grammar.head_of_kind_rec_info -> t
+
+  val create_region : Type_grammar.head_of_kind_region -> t
 
   val create_bottom : Flambda_kind.t -> t
 
@@ -53,11 +57,14 @@ module Expanded_type : sig
   type descr = private
     | Value of Type_grammar.head_of_kind_value
     | Naked_immediate of Type_grammar.head_of_kind_naked_immediate
+    | Naked_float32 of Type_grammar.head_of_kind_naked_float32
     | Naked_float of Type_grammar.head_of_kind_naked_float
     | Naked_int32 of Type_grammar.head_of_kind_naked_int32
     | Naked_int64 of Type_grammar.head_of_kind_naked_int64
     | Naked_nativeint of Type_grammar.head_of_kind_naked_nativeint
+    | Naked_vec128 of Type_grammar.head_of_kind_naked_vec128
     | Rec_info of Type_grammar.head_of_kind_rec_info
+    | Region of Type_grammar.head_of_kind_region
 
   val descr : t -> descr Or_unknown_or_bottom.t
 
@@ -65,6 +72,8 @@ module Expanded_type : sig
     | Value of Type_grammar.head_of_kind_value Or_unknown_or_bottom.t
     | Naked_immediate of
         Type_grammar.head_of_kind_naked_immediate Or_unknown_or_bottom.t
+    | Naked_float32 of
+        Type_grammar.head_of_kind_naked_float32 Or_unknown_or_bottom.t
     | Naked_float of
         Type_grammar.head_of_kind_naked_float Or_unknown_or_bottom.t
     | Naked_int32 of
@@ -73,7 +82,10 @@ module Expanded_type : sig
         Type_grammar.head_of_kind_naked_int64 Or_unknown_or_bottom.t
     | Naked_nativeint of
         Type_grammar.head_of_kind_naked_nativeint Or_unknown_or_bottom.t
+    | Naked_vec128 of
+        Type_grammar.head_of_kind_naked_vec128 Or_unknown_or_bottom.t
     | Rec_info of Type_grammar.head_of_kind_rec_info Or_unknown_or_bottom.t
+    | Region of Type_grammar.head_of_kind_region Or_unknown_or_bottom.t
 
   val descr_oub : t -> descr_oub
 end
@@ -89,6 +101,8 @@ val expand_head0 :
 val is_bottom : Typing_env.t -> Type_grammar.t -> bool
 
 val is_unknown : Typing_env.t -> Type_grammar.t -> bool
+
+val is_alias_to_a_symbol : Type_grammar.t -> bool
 
 type to_erase =
   | Everything_not_in of Typing_env.t

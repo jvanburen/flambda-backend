@@ -14,47 +14,44 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 (** Transformation of types into structures that can be used immediately to
     build terms. *)
 
-type var_or_symbol_or_tagged_immediate = private
-  | Var of Variable.t
-  | Symbol of Symbol.t
-  | Tagged_immediate of Targetint_31_63.t
-
-type to_lift =
-  (* private *)
-  (* CR mshinwell: resurrect *)
+type to_lift = private
   | Immutable_block of
       { tag : Tag.Scannable.t;
         is_unique : bool;
-        fields : var_or_symbol_or_tagged_immediate list
+        shape : Flambda_kind.Scannable_block_shape.t;
+        fields : Simple.t list
       }
+  | Boxed_float32 of Numeric_types.Float32_by_bit_pattern.t
   | Boxed_float of Numeric_types.Float_by_bit_pattern.t
   | Boxed_int32 of Numeric_types.Int32.t
   | Boxed_int64 of Numeric_types.Int64.t
   | Boxed_nativeint of Targetint_32_64.t
-  | Empty_array
+  | Boxed_vec128 of Vector_types.Vec128.Bit_pattern.t
+  | Immutable_float32_array of
+      { fields : Numeric_types.Float32_by_bit_pattern.t list }
+  | Immutable_float_array of
+      { fields : Numeric_types.Float_by_bit_pattern.t list }
+  | Immutable_int32_array of { fields : Int32.t list }
+  | Immutable_int64_array of { fields : Int64.t list }
+  | Immutable_nativeint_array of { fields : Targetint_32_64.t list }
+  | Immutable_vec128_array of
+      { fields : Vector_types.Vec128.Bit_pattern.t list }
+  | Immutable_value_array of { fields : Simple.t list }
+  | Empty_array of Empty_array_kind.t
 
 type reification_result = private
-  | Lift of to_lift (* CR mshinwell: rename? *)
-  | Lift_set_of_closures of
-      { closure_id : Closure_id.t;
-        function_types : Type_grammar.Function_type.t Closure_id.Map.t;
-        closure_vars : Simple.t Var_within_closure.Map.t
-      }
+  | Lift of to_lift
   | Simple of Simple.t
   | Cannot_reify
   | Invalid
 
 val reify :
-  ?allowed_if_free_vars_defined_in:Typing_env.t ->
-  ?additional_free_var_criterion:(Variable.t -> bool) ->
-  ?disallowed_free_vars:Variable.Set.t ->
-  ?allow_unique:bool ->
+  allowed_if_free_vars_defined_in:Typing_env.t ->
+  var_is_defined_at_toplevel:(Variable.t -> bool) ->
+  var_is_symbol_projection:(Variable.t -> bool) ->
   Typing_env.t ->
-  min_name_mode:Name_mode.t ->
   Type_grammar.t ->
   reification_result

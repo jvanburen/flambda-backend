@@ -17,7 +17,7 @@
 (** Translate a compilation unit. *)
 val unit :
   offsets:Exported_offsets.t ->
-  make_symbol:(?unitname:string -> string option -> string) ->
-  Flambda_unit.t ->
   all_code:Exported_code.t ->
+  reachable_names:Name_occurrences.t ->
+  Flambda_unit.t ->
   Cmm.phrase list

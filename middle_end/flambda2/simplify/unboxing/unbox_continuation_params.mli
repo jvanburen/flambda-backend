@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 open! Simplify_import
 
 module Decisions : sig
@@ -24,18 +22,21 @@ module Decisions : sig
   val print : Format.formatter -> t -> unit
 end
 
+val make_do_not_unbox_decisions : Bound_parameters.t -> Decisions.t
+
+type continuation_arg_types =
+  | Recursive
+  | Non_recursive of Continuation_uses.arg_types_by_use_id
+
 val make_decisions :
-  continuation_is_recursive:bool ->
-  arg_types_by_use_id:
-    Continuation_env_and_param_types.arg_at_use Apply_cont_rewrite_id.Map.t list ->
+  continuation_arg_types:continuation_arg_types ->
   DE.t ->
-  BP.t list ->
+  Bound_parameters.t ->
   T.t list ->
   DE.t * Decisions.t
 
 val compute_extra_params_and_args :
   Decisions.t ->
-  arg_types_by_use_id:
-    Continuation_env_and_param_types.arg_at_use Apply_cont_rewrite_id.Map.t list ->
+  arg_types_by_use_id:Continuation_uses.arg_types_by_use_id ->
   EPA.t ->
   EPA.t

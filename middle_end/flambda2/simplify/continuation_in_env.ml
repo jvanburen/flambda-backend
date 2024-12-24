@@ -14,20 +14,18 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 type t =
   | Linearly_used_and_inlinable of
-      { params : Bound_parameter.t list;
+      { params : Bound_parameters.t;
         handler : Rebuilt_expr.t;
         free_names_of_handler : Name_occurrences.t;
         cost_metrics_of_handler : Cost_metrics.t
       }
   | Non_inlinable_zero_arity of { handler : Rebuilt_expr.t Or_unknown.t }
-  | Non_inlinable_non_zero_arity of { arity : Flambda_arity.With_subkinds.t }
+  | Non_inlinable_non_zero_arity of { arity : [`Unarized] Flambda_arity.t }
   | Toplevel_or_function_return_or_exn_continuation of
-      { arity : Flambda_arity.With_subkinds.t }
-  | Unreachable of { arity : Flambda_arity.With_subkinds.t }
+      { arity : [`Unarized] Flambda_arity.t }
+  | Invalid of { arity : [`Unarized] Flambda_arity.t }
 
 let [@ocamlformat "disable"] print are_rebuilding_terms ppf t =
   match t with
@@ -39,7 +37,7 @@ let [@ocamlformat "disable"] print are_rebuilding_terms ppf t =
         @[<hov 1>(free_names_of_handler@ %a)@]@ \
         @[<hov 1>(cost_metrics_of_handler@ %a)@]\
         )@]"
-      Bound_parameter.List.print params
+      Bound_parameters.print params
       (Rebuilt_expr.print are_rebuilding_terms) handler
       Name_occurrences.print free_names_of_handler
       Cost_metrics.print cost_metrics_of_handler
@@ -52,18 +50,18 @@ let [@ocamlformat "disable"] print are_rebuilding_terms ppf t =
     Format.fprintf ppf "@[<hov 1>(Non_inlinable_non_zero_arity@ \
         @[<hov 1>(arity@ %a)@]\
         )@]"
-      Flambda_arity.With_subkinds.print arity
+      Flambda_arity.print arity
   | Toplevel_or_function_return_or_exn_continuation { arity } ->
     Format.fprintf ppf
       "@[<hov 1>(Toplevel_or_function_return_or_exn_continuation@ \
         @[<hov 1>(arity@ %a)@]\
         )@]"
-      Flambda_arity.With_subkinds.print arity
-  | Unreachable { arity } ->
-    Format.fprintf ppf "@[<hov 1>(Unreachable@ \
+      Flambda_arity.print arity
+  | Invalid { arity } ->
+    Format.fprintf ppf "@[<hov 1>(Invalid@ \
         @[<hov 1>(arity@ %a)@]\
         )@]"
-      Flambda_arity.With_subkinds.print arity
+      Flambda_arity.print arity
 
 let arity t =
   match t with
@@ -73,9 +71,9 @@ let arity t =
         free_names_of_handler = _;
         cost_metrics_of_handler = _
       } ->
-    Bound_parameter.List.arity_with_subkinds params
-  | Non_inlinable_zero_arity _ -> []
+    Bound_parameters.arity params
+  | Non_inlinable_zero_arity _ -> Flambda_arity.nullary
   | Non_inlinable_non_zero_arity { arity }
   | Toplevel_or_function_return_or_exn_continuation { arity }
-  | Unreachable { arity } ->
+  | Invalid { arity } ->
     arity

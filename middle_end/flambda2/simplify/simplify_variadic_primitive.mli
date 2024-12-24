@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 (** Simplification of primitives taking variable numbers of arguments. *)
 
 val simplify_variadic_primitive :
@@ -25,4 +23,4 @@ val simplify_variadic_primitive :
   args_with_tys:(Simple.t * Flambda2_types.t) list ->
   Debuginfo.t ->
   result_var:Bound_var.t ->
-  Simplified_named.t * Downwards_acc.t
+  Simplify_primitive_result.t

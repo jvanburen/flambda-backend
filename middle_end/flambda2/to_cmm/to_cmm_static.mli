@@ -14,16 +14,7 @@
 
 (** Translation of statically-allocated constants to Cmm. *)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 open! Flambda.Import
-
-val static_set_of_closures :
-  To_cmm_env.t ->
-  Symbol.t Closure_id.Map.t ->
-  Set_of_closures.t ->
-  Cmm.expression option ->
-  To_cmm_env.t * Cmm.data_item list * Cmm.expression option
 
 val static_consts :
   To_cmm_env.t ->
@@ -31,10 +22,12 @@ val static_consts :
   params_and_body:
     (To_cmm_env.t ->
     To_cmm_result.t ->
-    string ->
-    Flambda.Function_params_and_body.t ->
+    Code_id.t ->
+    Function_params_and_body.t ->
+    result_arity:[`Unarized] Flambda_arity.t ->
     fun_dbg:Debuginfo.t ->
+    zero_alloc_attribute:Zero_alloc_attribute.t ->
     Cmm.fundecl * To_cmm_result.t) ->
-  Bound_symbols.t ->
+  Bound_static.t ->
   Static_const_group.t ->
-  To_cmm_env.t * To_cmm_result.t * Cmm.expression option
+  To_cmm_env.t * To_cmm_result.t * To_cmm_env.expr_with_info option

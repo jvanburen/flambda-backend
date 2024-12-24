@@ -14,138 +14,141 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
+(* Unlike most of the rest of Flambda 2, this file depends on ocamloptcomp,
+   meaning it can call [Compilenv]. *)
 
-(* Unlike the rest of Flambda 2, this file depends on ocamloptcomp, meaning it
-   can call [Compilenv]. *)
-
-module Flambda1_compilation_unit = Compilation_unit
-module Flambda1_linkage_name = Linkage_name
-
-module Compilation_unit = struct
-  include Flambda2_identifiers.Compilation_unit
-
-  let of_flambda1_compilation_unit comp_unit =
-    let ident = Flambda1_compilation_unit.get_persistent_ident comp_unit in
-    let linkage_name =
-      comp_unit |> Flambda1_compilation_unit.get_linkage_name
-      |> Flambda1_linkage_name.to_string
-      |> Flambda2_identifiers.Linkage_name.create
-    in
-    create ident linkage_name
-end
-
-module Linkage_name = Flambda2_identifiers.Linkage_name
-module Symbol = Flambda2_identifiers.Symbol
-
-let symbol_for_module_block id =
-  assert (Ident.global id);
-  assert (not (Ident.is_predef id));
-  let comp_unit =
-    Compilenv.unit_for_global id
-    |> Compilation_unit.of_flambda1_compilation_unit
-  in
-  Symbol.unsafe_create comp_unit
-    (Linkage_name.create (Compilenv.symbol_for_global id))
-
-let symbol_for_global ?comp_unit id =
-  if Ident.global id && not (Ident.is_predef id)
-  then symbol_for_module_block id
-  else
-    let comp_unit =
-      match comp_unit with
-      | Some comp_unit -> comp_unit
-      | None ->
-        if Ident.is_predef id
-        then Compilation_unit.predefined_exception ()
-        else Compilation_unit.get_current_exn ()
-    in
-    Symbol.unsafe_create comp_unit
-      (Linkage_name.create (Compilenv.symbol_for_global id))
-
-let get_global_info comp_unit =
+let get_module_info comp_unit =
+  let cmx_name = Compilation_unit.name comp_unit in
   (* Typing information for predefined exceptions should be populated directly
      by the callee. *)
-  if Compilation_unit.is_predefined_exception comp_unit
+  if Compilation_unit.Name.equal cmx_name Compilation_unit.Name.predef_exn
   then
     Misc.fatal_error
       "get_global_info is not for use with predefined exception compilation \
        units";
-  if Compilation_unit.is_external_symbols comp_unit
+  if Compilation_unit.Name.equal cmx_name
+       (Flambda2_identifiers.Symbol.external_symbols_compilation_unit ()
+       |> Compilation_unit.name)
   then None
-  else
-    let id =
-      (* CR mshinwell: Unsure how to construct this properly. Also see CR in
-         Closure_conversion about the linkage names of module blocks *)
-      Compilation_unit.get_persistent_ident comp_unit
-    in
-    match Compilenv.get_global_info' id with
-    | None | Some (Flambda2 None) -> None
-    | Some (Flambda2 (Some info)) -> Some info
-    | Some (Clambda _) ->
-      (* CR mshinwell: This should be a user error, not a fatal error. Same
-         below. *)
-      Misc.fatal_errorf
-        "The .cmx file for unit %a was compiled with the Closure middle-end, \
-         not Flambda 2, and cannot be loaded"
-        Compilation_unit.print comp_unit
-    | Some (Flambda1 _) ->
-      Misc.fatal_errorf
-        "The .cmx file for unit %a was compiled with the Flambda 1 middle-end, \
-         not Flambda 2, and cannot be loaded"
-        Compilation_unit.print comp_unit
+  else Compilenv.get_unit_export_info comp_unit
 
-let print_rawflambda ppf unit =
-  if Flambda_features.dump_rawflambda ()
-  then
-    Format.fprintf ppf "\n%sAfter CPS conversion:%s@ %a@."
-      (Flambda_colours.each_file ())
-      (Flambda_colours.normal ())
-      Flambda_unit.print unit;
-  if Flambda_features.dump_rawfexpr ()
-  then
-    Format.fprintf ppf "\n%sAfter CPS conversion:%s@ %a@."
-      (Flambda_colours.each_file ())
-      (Flambda_colours.normal ())
-      Print_fexpr.flambda_unit
-      (unit |> Flambda_to_fexpr.conv)
-
-let print_flambda name ppf unit =
-  if Flambda_features.dump_flambda ()
-  then
-    Format.fprintf ppf "\n%sAfter %s:%s@ %a@."
-      (Flambda_colours.each_file ())
-      name
-      (Flambda_colours.normal ())
-      Flambda_unit.print unit;
-  if Flambda_features.dump_fexpr ()
-  then
-    Format.fprintf ppf "\n%sAfter %s:%s@ %a@."
-      (Flambda_colours.each_file ())
-      name
-      (Flambda_colours.normal ())
-      Print_fexpr.flambda_unit
-      (unit |> Flambda_to_fexpr.conv)
-
-let output_flexpect ~ml_filename ~raw_flambda:old_unit new_unit =
-  if Flambda_features.dump_flexpect ()
-  then
-    let basename = Filename.chop_suffix ml_filename ".ml" in
-    let filename = basename ^ ".flt" in
-    let before = old_unit |> Flambda_to_fexpr.conv in
-    let after = new_unit |> Flambda_to_fexpr.conv in
-    let test : Fexpr.expect_test_spec = { before; after } in
-    let out = open_out filename in
-    Misc.try_finally
-      ~always:(fun () -> close_out out)
-      (fun () ->
-        let ppf = out |> Format.formatter_of_out_channel in
-        Print_fexpr.expect_test_spec ppf test;
+let dump_to_target_if_any main_dump_ppf target ~header ~f a =
+  match (target : Flambda_features.dump_target) with
+  | Nowhere -> ()
+  | Main_dump_stream ->
+    Format.fprintf main_dump_ppf "\n%t%s:%t@ %a@." Flambda_colours.each_file
+      header Flambda_colours.pop f a
+  | File filename ->
+    Misc.protect_writing_to_file ~filename ~f:(fun out ->
+        let ppf = Format.formatter_of_out_channel out in
+        f ppf a;
         Format.pp_print_flush ppf ())
 
-let lambda_to_cmm ~ppf_dump:ppf ~prefixname ~filename ~module_ident
-    ~module_block_size_in_words ~module_initializer ~keep_symbol_tables =
-  Misc.Color.setup (Flambda_features.colour ());
+let dump_if_enabled ppf enabled ~header ~f a =
+  let target : Flambda_features.dump_target =
+    if enabled then Main_dump_stream else Nowhere
+  in
+  dump_to_target_if_any ppf target ~header ~f a
+
+let pp_flambda_as_fexpr ppf unit =
+  Print_fexpr.flambda_unit ppf (unit |> Flambda_to_fexpr.conv)
+
+let print_rawflambda ppf unit =
+  dump_if_enabled ppf
+    (Flambda_features.dump_rawflambda ())
+    ~header:"After CPS conversion" ~f:Flambda_unit.print unit;
+  dump_to_target_if_any ppf
+    (Flambda_features.dump_rawfexpr ())
+    ~header:"After CPS conversion" ~f:pp_flambda_as_fexpr unit
+
+let print_flambda name condition ppf unit =
+  let header = "After " ^ name in
+  dump_if_enabled ppf condition ~header ~f:Flambda_unit.print unit;
+  dump_to_target_if_any ppf
+    (Flambda_features.dump_fexpr ())
+    ~header ~f:pp_flambda_as_fexpr unit
+
+let pp_flambda_as_flexpect ppf (old_unit, new_unit) =
+  let before = old_unit |> Flambda_to_fexpr.conv in
+  let after = new_unit |> Flambda_to_fexpr.conv in
+  let test : Fexpr.expect_test_spec = { before; after } in
+  Print_fexpr.expect_test_spec ppf test
+
+let print_flexpect name main_dump_ppf ~raw_flambda:old_unit new_unit =
+  dump_to_target_if_any main_dump_ppf
+    (Flambda_features.dump_flexpect ())
+    ~header:("Before and after " ^ name)
+    ~f:pp_flambda_as_flexpect (old_unit, new_unit)
+
+module NO = Flambda2_nominal.Name_occurrences
+
+type run_result =
+  { cmx : Flambda_cmx_format.t option;
+    unit : Flambda_unit.t;
+    all_code : Exported_code.t;
+    exported_offsets : Exported_offsets.t;
+    reachable_names : NO.t
+  }
+
+let build_run_result unit ~free_names ~final_typing_env ~all_code slot_offsets :
+    run_result =
+  let module_symbol = Flambda_unit.module_symbol unit in
+  let function_slots_in_normal_projections =
+    NO.function_slots_in_normal_projections free_names
+  in
+  let value_slots_in_normal_projections =
+    NO.value_slots_in_normal_projections free_names
+  in
+  let all_function_slots = NO.all_function_slots free_names in
+  let all_value_slots = NO.all_value_slots free_names in
+  let ({ used_value_slots; exported_offsets } : Slot_offsets.result) =
+    let used_slots : Slot_offsets.used_slots =
+      { function_slots_in_normal_projections;
+        all_function_slots;
+        value_slots_in_normal_projections;
+        all_value_slots
+      }
+    in
+    let get_code_metadata code_id =
+      Exported_code.find_exn all_code code_id |> Code_or_metadata.code_metadata
+    in
+    Slot_offsets.finalize_offsets slot_offsets ~get_code_metadata ~used_slots
+  in
+  let reachable_names, cmx =
+    Flambda_cmx.prepare_cmx_file_contents ~final_typing_env ~module_symbol
+      ~used_value_slots ~exported_offsets all_code
+  in
+  let unit = Flambda_unit.with_used_value_slots unit used_value_slots in
+  { cmx; unit; all_code; exported_offsets; reachable_names }
+
+let lambda_to_cmm ~ppf_dump:ppf ~prefixname ~keep_symbol_tables
+    (program : Lambda.program) =
+  let compilation_unit = program.compilation_unit in
+  let module_block_size_in_words =
+    Lambda.main_module_block_size program.main_module_block_format
+  in
+  let module_initializer = program.code in
+  (* Make sure -linscan is enabled in classic mode. Doing this here to be sure
+     it happens exactly when -Oclassic is in effect, which we don't know at CLI
+     processing time because there may be an [@@@flambda_oclassic] or
+     [@@@flambda_o3] attribute. *)
+  if Flambda_features.classic_mode () then Clflags.use_linscan := true;
+  Misc.Style.setup (Flambda_features.colour ());
+  (* CR-someday mshinwell: Note for future WebAssembly work: this thing about
+     the length of arrays will need fixing, I don't think it only applies to the
+     Cmm translation.
+
+     This is partially fixed now, but the float array optimization case for
+     array length in the Cmm translation assumes the floats are word width. *)
+  (* The Flambda 2 code won't currently operate on 32-bit hosts; see
+     [Name_occurrences]. *)
+  if Sys.word_size <> 64
+  then Misc.fatal_error "Flambda 2 can only run on 64-bit hosts at present";
+  (* At least one place in the Cmm translation code (for unboxed arrays) cannot
+     cope with big-endian systems, and it seems unlikely any such systems will
+     have to be supported in the future anyway. *)
+  if Arch.big_endian
+  then Misc.fatal_error "Flambda2 only supports little-endian hosts";
   (* When the float array optimisation is enabled, the length of an array needs
      to be computed differently according to the array kind, in the case where
      the width of a float is not equal to the machine word width (at present,
@@ -157,77 +160,88 @@ let lambda_to_cmm ~ppf_dump:ppf ~prefixname ~filename ~module_ident
       "Cannot compile on targets where floats are not word-width when the \
        float array optimisation is enabled";
   let run () =
-    let raw_flambda, code, offsets =
+    let cmx_loader = Flambda_cmx.create_loader ~get_module_info in
+    let (Mode mode) = Flambda_features.mode () in
+    let { Closure_conversion.unit = raw_flambda;
+          code_slot_offsets;
+          metadata = close_program_metadata
+        } =
       Profile.record_call "lambda_to_flambda" (fun () ->
-          Lambda_to_flambda.lambda_to_flambda ~symbol_for_global
-            ~big_endian:Arch.big_endian ~module_ident
-            ~module_block_size_in_words module_initializer)
+          Lambda_to_flambda.lambda_to_flambda ~mode ~big_endian:Arch.big_endian
+            ~cmx_loader ~compilation_unit ~module_block_size_in_words
+            module_initializer)
     in
     Compiler_hooks.execute Raw_flambda2 raw_flambda;
     print_rawflambda ppf raw_flambda;
-    (if Flambda_features.inlining_report ()
-    then
-      let output_prefix = prefixname ^ ".cps_conv" in
-      Inlining_report.output_then_forget_decisions ~output_prefix);
-    let flambda, offsets, cmx, all_code =
-      if Flambda_features.classic_mode ()
-      then
-        let exported_offsets =
-          match (offsets : _ Or_unknown.t) with
-          | Unknown ->
-            Misc.fatal_errorf
-              "Classic mode requires lambda_to_flambda to compute\n\
-              \               the offsets for closure elements"
-          | Known closure_offsets -> closure_offsets
-        in
-        raw_flambda, exported_offsets, None, code
-      else
-        let raw_flambda =
-          if Flambda_features.Debug.permute_every_name ()
-          then Flambda_unit.permute_everything raw_flambda
-          else raw_flambda
-        in
+    let flambda, offsets, reachable_names, cmx, all_code =
+      match mode, close_program_metadata with
+      | Classic, Classic (code, reachable_names, cmx, offsets) ->
+        (if Flambda_features.inlining_report ()
+        then
+          let output_prefix = prefixname ^ ".cps_conv" in
+          let inlining_tree =
+            Inlining_report.output_then_forget_decisions ~output_prefix
+          in
+          Compiler_hooks.execute Inlining_tree inlining_tree);
+        raw_flambda, offsets, reachable_names, cmx, code
+      | Normal, Normal ->
         let round = 0 in
-        let { Simplify.unit = flambda; exported_offsets; cmx; all_code } =
+        let { Simplify.free_names;
+              final_typing_env;
+              all_code;
+              slot_offsets;
+              unit = flambda
+            } =
           Profile.record_call ~accumulate:true "simplify" (fun () ->
-              Simplify.run ~symbol_for_global ~get_global_info ~round
-                raw_flambda)
+              Simplify.run ~cmx_loader ~round ~code_slot_offsets raw_flambda)
         in
         (if Flambda_features.inlining_report ()
         then
           let output_prefix = Printf.sprintf "%s.%d" prefixname round in
-          Inlining_report.output_then_forget_decisions ~output_prefix);
+          let inlining_tree =
+            Inlining_report.output_then_forget_decisions ~output_prefix
+          in
+          Compiler_hooks.execute Inlining_tree inlining_tree);
         Compiler_hooks.execute Flambda2 flambda;
-        print_flambda "simplify" ppf flambda;
-        output_flexpect ~ml_filename:filename ~raw_flambda flambda;
-        flambda, exported_offsets, cmx, all_code
+        let last_pass_name = "simplify" in
+        print_flambda last_pass_name
+          (Flambda_features.dump_simplify ())
+          ppf flambda;
+        print_flexpect "simplify" ppf ~raw_flambda flambda;
+        let flambda, free_names, all_code, slot_offsets, last_pass_name =
+          if Flambda_features.enable_reaper ()
+          then (
+            let flambda, free_names, all_code, slot_offsets =
+              Profile.record_call ~accumulate:true "reaper" (fun () ->
+                  Flambda2_reaper.Reaper.run ~cmx_loader ~all_code flambda)
+            in
+            print_flexpect "reaper" ppf ~raw_flambda flambda;
+            flambda, free_names, all_code, slot_offsets, "reaper")
+          else flambda, free_names, all_code, slot_offsets, last_pass_name
+        in
+        print_flambda last_pass_name
+          (Flambda_features.dump_flambda ())
+          ppf flambda;
+        let { unit = flambda; exported_offsets; cmx; all_code; reachable_names }
+            =
+          build_run_result flambda ~free_names ~final_typing_env ~all_code
+            slot_offsets
+        in
+        Compiler_hooks.execute Reaped_flambda2 flambda;
+        flambda, exported_offsets, reachable_names, cmx, all_code
     in
-    begin
-      match Sys.getenv "PRINT_SIZES" with
-      | exception Not_found -> ()
-      | _ ->
-        Exported_code.iter_code all_code ~f:(fun code ->
-            let size = Code.cost_metrics code in
-            Format.fprintf Format.std_formatter "%a %a\n"
-              Flambda2_identifiers.Code_id.print (Code.code_id code)
-              Cost_metrics.print size)
-    end;
-    begin
-      match cmx with
-      | None ->
-        () (* Either opaque was passed, or there is no need to export offsets *)
-      | Some cmx -> Compilenv.flambda2_set_export_info cmx
-    end;
+    (match cmx with
+    | None ->
+      () (* Either opaque was passed, or there is no need to export offsets *)
+    | Some cmx -> Compilenv.set_export_info cmx);
     let cmm =
-      Flambda2_to_cmm.To_cmm.unit ~make_symbol:Compilenv.make_symbol flambda
-        ~all_code ~offsets
+      Flambda2_to_cmm.To_cmm.unit flambda ~all_code ~offsets ~reachable_names
     in
     if not keep_symbol_tables
-    then begin
+    then (
       Compilenv.reset_info_tables ();
       Flambda2_identifiers.Continuation.reset ();
-      Flambda2_identifiers.Reg_width_things.reset ()
-    end;
+      Flambda2_identifiers.Int_ids.reset ());
     cmm
   in
   Profile.record_call "flambda2" run

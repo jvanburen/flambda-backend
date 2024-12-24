@@ -3,38 +3,34 @@ module Domain = struct
     | Reachable
     | Unreachable
 
-  let top = Reachable
-
   let bot = Unreachable
 
-  let compare left right =
+  let less_equal left right =
     match left, right with
-    | Reachable, Reachable -> 0
-    | Reachable, Unreachable -> 1
-    | Unreachable, Reachable -> -1
-    | Unreachable, Unreachable -> 0
+    | Reachable, Reachable -> true
+    | Reachable, Unreachable -> false
+    | Unreachable, Reachable -> true
+    | Unreachable, Unreachable -> true
 
   let join left right =
     match left, right with
     | Reachable, (Reachable | Unreachable) | Unreachable, Reachable -> Reachable
     | Unreachable, Unreachable -> Unreachable
-
-  let to_string = function
-    | Reachable -> "reachable"
-    | Unreachable -> "unreachable"
 end
 
 module Transfer = struct
   type domain = Domain.t
 
-  type t =
+  type context = unit
+
+  type image =
     { normal : domain;
       exceptional : domain
     }
 
-  let basic value _ = { normal = value; exceptional = value }
+  let basic value _ _ = value
 
-  let terminator value _ = { normal = value; exceptional = value }
+  let terminator value _ _ = { normal = value; exceptional = value }
 end
 
 module Dataflow = Cfg_dataflow.Forward (Domain) (Transfer)
@@ -42,7 +38,7 @@ module Dataflow = Cfg_dataflow.Forward (Domain) (Transfer)
 let run_dead_block : Cfg_with_layout.t -> unit =
  fun cfg_with_layout ->
   let cfg = Cfg_with_layout.cfg cfg_with_layout in
-  match Dataflow.run cfg () with
+  match Dataflow.run cfg ~init:Reachable ~handlers_are_entry_points:true () with
   | Result.Error _ ->
     Misc.fatal_error
       "Dataflow.run_dead_code: forward analysis did not reach a fix-point"
@@ -66,10 +62,8 @@ let run_dead_block : Cfg_with_layout.t -> unit =
               <- Label.Set.remove label succ_block.predecessors)
           (Cfg.successor_labels ~normal:true ~exn:true block);
         block.terminator <- { block.terminator with desc = Cfg_intf.S.Never };
-        block.exns <- Label.Set.empty)
+        block.exn <- None)
       unreachable_labels;
-    Label.Set.iter
-      (fun label -> Cfg_with_layout.remove_block cfg_with_layout label)
-      unreachable_labels;
+    Cfg_with_layout.remove_blocks cfg_with_layout unreachable_labels;
     (* CR xclerc for xclerc: temporary. *)
     Eliminate_dead_blocks.run cfg_with_layout

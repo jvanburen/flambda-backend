@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 type t
 
 (** Print a downwards accumulator to a formatter. *)
@@ -24,8 +22,8 @@ val print : Format.formatter -> t -> unit
 (** Create a downwards accumulator. *)
 val create :
   Downwards_env.t ->
+  Slot_offsets.t Code_id.Map.t ->
   Continuation_uses_env.t ->
-  compute_closure_offsets:bool ->
   t
 
 (** Extract the environment component of the given downwards accumulator. *)
@@ -38,10 +36,10 @@ val map_denv : t -> f:(Downwards_env.t -> Downwards_env.t) -> t
 val with_denv : t -> Downwards_env.t -> t
 
 (** Extract the dataflow analysis accumulator *)
-val data_flow : t -> Data_flow.t
+val flow_acc : t -> Flow.Acc.t
 
 (** Map the dataflow analysis accumulator of the given dacc. *)
-val map_data_flow : t -> f:(Data_flow.t -> Data_flow.t) -> t
+val map_flow_acc : t -> f:(Flow.Acc.t -> Flow.Acc.t) -> t
 
 include Continuation_uses_env_intf.S with type t := t
 
@@ -57,7 +55,7 @@ val demoted_exn_handlers : t -> Continuation.Set.t
 
 val code_age_relation : t -> Code_age_relation.t
 
-val with_code_age_relation : t -> Code_age_relation.t -> t
+val with_code_age_relation : t -> code_age_relation:Code_age_relation.t -> t
 
 val typing_env : t -> Flambda2_types.Typing_env.t
 
@@ -85,11 +83,11 @@ val with_shareable_constants :
 
 val shareable_constants : t -> Symbol.t Static_const.Map.t
 
-val add_use_of_closure_var : t -> Var_within_closure.t -> t
+val add_use_of_value_slot : t -> Value_slot.t -> t
 
-val used_closure_vars : t -> Name_occurrences.t
+val used_value_slots : t -> Name_occurrences.t
 
-val with_used_closure_vars : t -> used_closure_vars:Name_occurrences.t -> t
+val with_used_value_slots : t -> used_value_slots:Name_occurrences.t -> t
 
 val add_code_ids_to_remember : t -> Code_id.Set.t -> t
 
@@ -97,13 +95,43 @@ val code_ids_to_remember : t -> Code_id.Set.t
 
 val with_code_ids_to_remember : t -> code_ids_to_remember:Code_id.Set.t -> t
 
-val set_do_not_rebuild_terms_and_disable_inlining : t -> t
+val add_code_ids_to_never_delete : t -> Code_id.Set.t -> t
+
+val code_ids_to_never_delete : t -> Code_id.Set.t
+
+val with_code_ids_to_never_delete :
+  t -> code_ids_to_never_delete:Code_id.Set.t -> t
+
+val add_code_ids_never_simplified : t -> old_code_ids:Code_id.Set.t -> t
+
+val code_ids_never_simplified : t -> Code_id.Set.t
+
+val with_code_ids_never_simplified :
+  t -> code_ids_never_simplified:Code_id.Set.t -> t
 
 val are_rebuilding_terms : t -> Are_rebuilding_terms.t
 
-val do_not_rebuild_terms : t -> bool
+val slot_offsets : t -> Slot_offsets.t Code_id.Map.t
 
-val closure_offsets : t -> Closure_offsets.t Or_unknown.t
+val with_slot_offsets : t -> slot_offsets:Slot_offsets.t Code_id.Map.t -> t
 
-val with_closure_offsets :
-  t -> closure_offsets:Closure_offsets.t Or_unknown.t -> t
+val merge_debuginfo_rewrite : t -> bound_to:Simple.t -> Debuginfo.t -> t
+
+val find_debuginfo_rewrite : t -> bound_to:Simple.t -> Debuginfo.t option
+
+val are_lifting_conts : t -> Are_lifting_conts.t
+
+val with_are_lifting_conts : t -> Are_lifting_conts.t -> t
+
+val get_and_clear_lifted_continuations :
+  t -> t * (Downwards_env.t * Original_handlers.t) list
+
+val add_lifted_continuation : Downwards_env.t -> Original_handlers.t -> t -> t
+
+val get_continuation_lifting_budget : t -> int
+
+val reset_continuation_lifting_budget : t -> t
+
+val decrease_continuation_lifting_budget : t -> int -> t
+
+val prepare_for_speculative_inlining : t -> t

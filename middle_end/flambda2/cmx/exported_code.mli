@@ -15,6 +15,8 @@
 
 type t
 
+type raw
+
 include Contains_ids.S with type t := t
 
 val apply_renaming : Code_id.t Code_id.Map.t -> Renaming.t -> t -> t
@@ -22,6 +24,8 @@ val apply_renaming : Code_id.t Code_id.Map.t -> Renaming.t -> t -> t
 val print : Format.formatter -> t -> unit
 
 val empty : t
+
+val free_names : t -> Name_occurrences.t
 
 val add_code : keep_code:(Code_id.t -> bool) -> Code.t Code_id.Map.t -> t -> t
 
@@ -40,7 +44,16 @@ val find : t -> Code_id.t -> Code_or_metadata.t option
 
 val remove_unreachable : reachable_names:Name_occurrences.t -> t -> t
 
-val remove_unused_closure_vars_from_result_types :
-  used_closure_vars:Var_within_closure.Set.t -> t -> t
+val remove_unused_value_slots_from_result_types_and_shortcut_aliases :
+  used_value_slots:Value_slot.Set.t ->
+  canonicalise:(Simple.t -> Simple.t) ->
+  t ->
+  t
 
 val iter_code : t -> f:(Code.t -> unit) -> unit
+
+val from_raw : sections:Flambda_backend_utils.File_sections.t -> raw -> t
+
+val to_raw : add_section:(Obj.t -> int) -> t -> raw
+
+val map_raw_index : (int -> int) -> raw -> raw

@@ -1,12 +1,17 @@
 (include_subdirs unqualified)
 
+(env
+ (_
+  (flags
+   (:standard -w +4+9-30+44+45+48-69-70))))
+
 (library
  (name flambda2)
  (wrapped false)
+ (instrumentation
+  (backend bisect_ppx))
  (flags
   (:standard
-   -principal
-   -nostdlib
    -open
    Flambda2_lattices
    -open
@@ -26,10 +31,9 @@
    -open
    Flambda2_ui))
  (ocamlopt_flags
-  (:standard -O3))
+  (:standard -O3 -open Int_replace_polymorphic_compare))
  (modules flambda2)
  (libraries
-  stdlib
   ocamlcommon
   ocamlbytecomp
   ocamloptcomp
@@ -41,4 +45,5 @@
   flambda2_simplify_shared
   flambda2_terms
   flambda2_to_cmm
-  flambda2_ui))
+  flambda2_ui
+  flambda2_reaper))

@@ -13,20 +13,16 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-9-30-40-41-42"]
-
 (** Simplification of external calls *)
 
 type t =
   | Unchanged of { return_types : Flambda2_types.t list Or_unknown.t }
-  | Poly_compare_specialized of Downwards_acc.t * Flambda.Expr.t
+  | Specialised of Downwards_acc.t * Flambda.Expr.t * Removed_operations.t
   | Invalid
 
 val simplify_extcall :
   Downwards_acc.t ->
   Flambda.Apply.t ->
   callee_ty:Flambda2_types.t ->
-  param_arity:Flambda_arity.t ->
-  return_arity:Flambda_arity.t ->
   arg_types:Flambda2_types.t list ->
   t

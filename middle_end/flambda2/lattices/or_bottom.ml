@@ -14,13 +14,11 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 type 'a t =
   | Ok of 'a
   | Bottom
 
-let [@ocamlformat "disable"] print f ppf t =
+let print f ppf t =
   match t with
   | Ok contents -> Format.fprintf ppf "@[(Ok %a)@]" f contents
   | Bottom -> Format.pp_print_string ppf "Bottom"

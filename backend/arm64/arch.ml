@@ -38,16 +38,15 @@ type addressing_mode =
 
 (* Specific operations *)
 
-type cmm_label = int
+type cmm_label = Label.t
   (* Do not introduce a dependency to Cmm *)
 
+type bswap_bitwidth = Sixteen | Thirtytwo | Sixtyfour
+
 type specific_operation =
+  | Ifar_poll of { return_label: cmm_label option }
   | Ifar_alloc of { bytes : int; dbginfo : Debuginfo.alloc_dbginfo }
-  | Ifar_intop_checkbound
-  | Ifar_intop_imm_checkbound of { bound : int; }
   | Ishiftarith of arith_operation * int
-  | Ishiftcheckbound of { shift : int; }
-  | Ifar_shiftcheckbound of { shift : int; }
   | Imuladd       (* multiply and add *)
   | Imulsub       (* multiply and subtract *)
   | Inegmulf      (* floating-point negate and multiply *)
@@ -56,8 +55,9 @@ type specific_operation =
   | Imulsubf      (* floating-point multiply and subtract *)
   | Inegmulsubf   (* floating-point negate, multiply and subtract *)
   | Isqrtf        (* floating-point square root *)
-  | Ibswap of int (* endianness conversion *)
+  | Ibswap of { bitwidth: bswap_bitwidth; } (* endianness conversion *)
   | Imove32       (* 32-bit integer move *)
+  | Isignext of int (* sign extension *)
 
 and arith_operation =
     Ishiftadd
@@ -70,6 +70,8 @@ let big_endian = false
 let size_addr = 8
 let size_int = 8
 let size_float = 8
+
+let size_vec128 = 16
 
 let allow_unaligned_access = false
 
@@ -102,14 +104,17 @@ let print_addressing printreg addr ppf arg =
   | Ibased(s, n) ->
       fprintf ppf "\"%s\" + %i" s n
 
+let int_of_bswap_bitwidth = function
+  | Sixteen -> 16
+  | Thirtytwo -> 32
+  | Sixtyfour -> 64
+
 let print_specific_operation printreg op ppf arg =
   match op with
+  | Ifar_poll _ ->
+    fprintf ppf "(far) poll"
   | Ifar_alloc { bytes; } ->
     fprintf ppf "(far) alloc %i" bytes
-  | Ifar_intop_checkbound ->
-    fprintf ppf "%a (far) check > %a" printreg arg.(0) printreg arg.(1)
-  | Ifar_intop_imm_checkbound { bound; } ->
-    fprintf ppf "%a (far) check > %i" printreg arg.(0) bound
   | Ishiftarith(op, shift) ->
       let op_name = function
       | Ishiftadd -> "+"
@@ -120,12 +125,6 @@ let print_specific_operation printreg op ppf arg =
        else sprintf ">> %i" (-shift) in
       fprintf ppf "%a %s %a %s"
        printreg arg.(0) (op_name op) printreg arg.(1) shift_mark
-  | Ishiftcheckbound { shift; } ->
-      fprintf ppf "check %a >> %i > %a" printreg arg.(0) shift
-        printreg arg.(1)
-  | Ifar_shiftcheckbound { shift; } ->
-      fprintf ppf
-        "(far) check %a >> %i > %a" printreg arg.(0) shift printreg arg.(1)
   | Imuladd ->
       fprintf ppf "(%a * %a) + %a"
         printreg arg.(0)
@@ -163,12 +162,16 @@ let print_specific_operation printreg op ppf arg =
   | Isqrtf ->
       fprintf ppf "sqrtf %a"
         printreg arg.(0)
-  | Ibswap n ->
+  | Ibswap { bitwidth } ->
+      let n = int_of_bswap_bitwidth bitwidth in
       fprintf ppf "bswap%i %a" n
         printreg arg.(0)
   | Imove32 ->
       fprintf ppf "move32 %a"
         printreg arg.(0)
+  | Isignext n ->
+      fprintf ppf "signext%d %a"
+        n printreg arg.(0)
 
 let equal_addressing_mode left right =
   match left, right with
@@ -190,20 +193,10 @@ let equal_specific_operation left right =
   | Ifar_alloc { bytes = left_bytes; dbginfo = _; },
     Ifar_alloc { bytes = right_bytes; dbginfo = _; } ->
     Int.equal left_bytes right_bytes
-  | Ifar_intop_checkbound, Ifar_intop_checkbound -> true
-  | Ifar_intop_imm_checkbound { bound = left_bound; },
-    Ifar_intop_imm_checkbound { bound = right_bound; } ->
-    Int.equal left_bound right_bound
   | Ishiftarith (left_arith_operation, left_int),
     Ishiftarith (right_arith_operation, right_int) ->
     equal_arith_operation left_arith_operation right_arith_operation
     && Int.equal left_int right_int
-  | Ishiftcheckbound { shift = left_shift; },
-    Ishiftcheckbound { shift = right_shift; } ->
-    Int.equal left_shift right_shift
-  | Ifar_shiftcheckbound { shift = left_shift; },
-    Ifar_shiftcheckbound { shift = right_shift; } ->
-    Int.equal left_shift right_shift
   | Imuladd, Imuladd -> true
   | Imulsub, Imulsub -> true
   | Inegmulf, Inegmulf -> true
@@ -212,10 +205,143 @@ let equal_specific_operation left right =
   | Imulsubf, Imulsubf -> true
   | Inegmulsubf, Inegmulsubf -> true
   | Isqrtf, Isqrtf -> true
-  | Ibswap left_int, Ibswap right_int -> Int.equal left_int right_int
+  | Ibswap { bitwidth = left }, Ibswap { bitwidth = right } ->
+    Int.equal (int_of_bswap_bitwidth left) (int_of_bswap_bitwidth right)
   | Imove32, Imove32 -> true
-  | (Ifar_alloc _  | Ifar_intop_checkbound | Ifar_intop_imm_checkbound _
-    | Ishiftarith _ | Ishiftcheckbound _ | Ifar_shiftcheckbound _
+  | Isignext left, Isignext right -> Int.equal left right
+  | (Ifar_alloc _  | Ifar_poll _  | Ishiftarith _
     | Imuladd | Imulsub | Inegmulf | Imuladdf | Inegmuladdf | Imulsubf
-    | Inegmulsubf | Isqrtf | Ibswap _ | Imove32), _ -> false
+    | Inegmulsubf | Isqrtf | Ibswap _ | Imove32 | Isignext _), _ -> false
 
+let isomorphic_specific_operation op1 op2 =
+  equal_specific_operation op1 op2
+
+(* Recognition of logical immediate arguments *)
+
+(* An automaton to recognize ( 0+1+0* | 1+0+1* )
+
+               0          1          0
+              / \        / \        / \
+              \ /        \ /        \ /
+        -0--> [1] --1--> [2] --0--> [3]
+       /
+     [0]
+       \
+        -1--> [4] --0--> [5] --1--> [6]
+              / \        / \        / \
+              \ /        \ /        \ /
+               1          0          1
+
+The accepting states are 2, 3, 5 and 6. *)
+
+let auto_table = [|   (* accepting?, next on 0, next on 1 *)
+  (* state 0 *) (false, 1, 4);
+  (* state 1 *) (false, 1, 2);
+  (* state 2 *) (true,  3, 2);
+  (* state 3 *) (true,  3, 7);
+  (* state 4 *) (false, 5, 4);
+  (* state 5 *) (true,  5, 6);
+  (* state 6 *) (true,  7, 6);
+  (* state 7 *) (false, 7, 7)   (* error state *)
+|]
+
+let rec run_automata nbits state input =
+  let (acc, next0, next1) = auto_table.(state) in
+  if nbits <= 0
+  then acc
+  else run_automata (nbits - 1)
+                    (if Nativeint.logand input 1n = 0n then next0 else next1)
+                    (Nativeint.shift_right_logical input 1)
+
+(* The following function determines a length [e]
+   such that [x] is a repetition [BB...B] of a bit pattern [B] of length [e].
+   [e] ranges over 64, 32, 16, 8, 4, 2.  The smaller [e] the better. *)
+
+let logical_imm_length x =
+  (* [test n] checks that the low [2n] bits of [x] are of the
+     form [BB], that is, two occurrences of the same [n] bits *)
+  let test n =
+    let mask = Nativeint.(sub (shift_left 1n n) 1n) in
+    let low_n_bits = Nativeint.(logand x mask) in
+    let next_n_bits = Nativeint.(logand (shift_right_logical x n) mask) in
+    low_n_bits = next_n_bits in
+  (* If [test n] fails, we know that the length [e] is
+     at least [2n].  Hence we test with decreasing values of [n]:
+     32, 16, 8, 4, 2. *)
+  if not (test 32) then 64
+  else if not (test 16) then 32
+  else if not (test 8) then 16
+  else if not (test 4) then 8
+  else if not (test 2) then 4
+  else 2
+
+(* A valid logical immediate is
+- neither [0] nor [-1];
+- composed of a repetition [BBBBB] of a bit-pattern [B] of length [e]
+- the low [e] bits of the number, that is, [B], match [0+1+0*] or [1+0+1*].
+*)
+
+let is_logical_immediate x =
+  x <> 0n && x <> -1n && run_automata (logical_imm_length x) 0 x
+
+(* Specific operations that are pure *)
+
+let operation_is_pure : specific_operation -> bool = function
+  | Ifar_alloc _ | Ifar_poll _ -> false
+  | Ishiftarith _ -> true
+  | Imuladd -> true
+  | Imulsub -> true
+  | Inegmulf -> true
+  | Imuladdf -> true
+  | Inegmuladdf -> true
+  | Imulsubf -> true
+  | Inegmulsubf -> true
+  | Isqrtf -> true
+  | Ibswap _ -> true
+  | Imove32 -> true
+  | Isignext _ -> true
+
+(* Specific operations that can raise *)
+
+let operation_can_raise = function
+  | Ifar_alloc _
+  | Ifar_poll _ -> true
+  | Imuladd
+  | Imulsub
+  | Inegmulf
+  | Imuladdf
+  | Inegmuladdf
+  | Imulsubf
+  | Inegmulsubf
+  | Isqrtf
+  | Imove32
+  | Ishiftarith (_, _)
+  | Isignext _
+  | Ibswap _ -> false
+
+let operation_allocates = function
+  | Ifar_alloc _ -> true
+  | Ifar_poll _
+  | Imuladd
+  | Imulsub
+  | Inegmulf
+  | Imuladdf
+  | Inegmuladdf
+  | Imulsubf
+  | Inegmulsubf
+  | Isqrtf
+  | Imove32
+  | Ishiftarith (_, _)
+  | Isignext _
+  | Ibswap _ -> false
+
+(* See `amd64/arch.ml`. *)
+let equal_addressing_mode_without_displ (addressing_mode_1: addressing_mode)
+      (addressing_mode_2 : addressing_mode) =
+  match addressing_mode_1, addressing_mode_2 with
+  | Iindexed _, Iindexed _ -> true
+  | Ibased (var1, _), Ibased (var2, _) -> String.equal var1 var2
+  | (Iindexed _ | Ibased _), _ -> false
+
+let addressing_offset_in_bytes _ _  ~arg_offset_in_bytes:_  _ _ =
+  None   (* conservative *)

@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 module K = Flambda_kind
 module MTC = More_type_creators
 module TE = Typing_env
@@ -47,7 +45,8 @@ let join_types ~env_at_fork envs_with_levels =
                   else
                     let kind = TEL.find_kind level var in
                     TE.add_definition base_env
-                      (Bound_name.var (Bound_var.create var Name_mode.in_types))
+                      (Bound_name.create_var
+                         (Bound_var.create var Name_mode.in_types))
                       kind)
                 vars base_env)
             (TEL.variables_by_binding_time level)
@@ -85,14 +84,11 @@ let join_types ~env_at_fork envs_with_levels =
         (* CR vlaviron: This is very likely quadratic (number of uses times
            number of variables in all uses). However it's hard to know how we
            could do better. *)
-        TE.add_env_extension base_env
+        TE.add_env_extension_maybe_bottom base_env
           (TEE.from_map joined_types)
-          ~meet_type:Meet_and_join.meet
+          ~meet_type:(Meet_and_join.meet_type ())
       in
       let join_types name joined_ty use_ty =
-        (* CR mshinwell for vlaviron: Looks like [TE.mem] needs fixing with
-           respect to names from other units with their .cmx missing (c.f.
-           testsuite/tests/lib-dynlink-native/). *)
         let same_unit =
           Compilation_unit.equal
             (Name.compilation_unit name)
@@ -147,7 +143,7 @@ let join_types ~env_at_fork envs_with_levels =
             Join_env.create base_env ~left_env ~right_env:env_at_use
           in
           match
-            Meet_and_join.join ~bound_name:name join_env joined_ty use_ty
+            (Meet_and_join.join ()) ~bound_name:name join_env joined_ty use_ty
           with
           | Known joined_ty -> Some joined_ty
           | Unknown -> None
@@ -155,13 +151,24 @@ let join_types ~env_at_fork envs_with_levels =
       Name.Map.merge join_types joined_types (TEL.equations t))
 
 let construct_joined_level envs_with_levels ~env_at_fork ~allowed ~joined_types
-    =
+    ~params =
+  let allowed_and_new =
+    (* Parameters are already in the resulting environment *)
+    List.fold_left
+      (fun allowed_and_new param ->
+        Name_occurrences.remove_var allowed_and_new
+          ~var:(Bound_parameter.var param))
+      allowed params
+  in
+  let variable_is_in_new_level var =
+    Name_occurrences.mem_var allowed_and_new var
+  in
   let defined_vars, binding_times =
     List.fold_left
       (fun (defined_vars, binding_times) (_env_at_use, _id, _use_kind, t) ->
         let defined_vars_this_level =
           Variable.Map.filter
-            (fun var _ -> Name_occurrences.mem_var allowed var)
+            (fun var _ -> variable_is_in_new_level var)
             (TEL.defined_variables_with_kinds t)
         in
         let defined_vars =
@@ -179,11 +186,7 @@ let construct_joined_level envs_with_levels ~env_at_fork ~allowed ~joined_types
         let binding_times_this_level =
           Binding_time.Map.filter_map
             (fun _ vars ->
-              let vars =
-                Variable.Set.filter
-                  (fun var -> Name_occurrences.mem_var allowed var)
-                  vars
-              in
+              let vars = Variable.Set.filter variable_is_in_new_level vars in
               if Variable.Set.is_empty vars then None else Some vars)
             (TEL.variables_by_binding_time t)
         in
@@ -264,12 +267,12 @@ let join ~env_at_fork envs_with_levels ~params ~extra_lifted_consts_in_use_envs
      sides of the propagated equations are also themselves propagated. The
      definition of any such propagated name (i.e. one that does not occur in the
      environment at the fork point) will be made existential. *)
-  (* CR vlaviron: We need to compute the free names of joined_types, we can't
-     use a typing environment *)
   let free_names_transitive typ =
+    (* We need to compute the free names of joined_types, but we can't use a
+       typing environment. *)
     let rec free_names_transitive0 typ ~result =
       let free_names = TG.free_names typ in
-      let to_traverse = Name_occurrences.diff free_names result in
+      let to_traverse = Name_occurrences.diff free_names ~without:result in
       Name_occurrences.fold_names to_traverse ~init:result
         ~f:(fun result name ->
           let result =
@@ -300,31 +303,36 @@ let join ~env_at_fork envs_with_levels ~params ~extra_lifted_consts_in_use_envs
   in
   (* Having calculated which equations to propagate, the resulting level can now
      be constructed. *)
-  construct_joined_level envs_with_levels ~env_at_fork ~allowed ~joined_types
+  ( construct_joined_level envs_with_levels ~env_at_fork ~allowed ~joined_types
+      ~params,
+    Name_occurrences.fold_names allowed ~init:Name.Set.empty
+      ~f:(fun names name -> Name.Set.add name names) )
 
 let n_way_join ~env_at_fork envs_with_levels ~params
     ~extra_lifted_consts_in_use_envs ~extra_allowed_names =
   match envs_with_levels with
-  | [] -> TEL.empty
+  | [] -> TEL.empty, Name.Set.empty
   | envs_with_levels ->
     join ~env_at_fork envs_with_levels ~params ~extra_lifted_consts_in_use_envs
       ~extra_allowed_names
 
-let cut_and_n_way_join definition_typing_env ts_and_use_ids ~params
-    ~unknown_if_defined_at_or_later_than ~extra_lifted_consts_in_use_envs
-    ~extra_allowed_names =
-  (* CR mshinwell: Can't [unknown_if_defined_at_or_later_than] just be computed
-     by this function? *)
+let cut_and_n_way_join definition_typing_env ts_and_use_ids ~params ~cut_after
+    ~extra_lifted_consts_in_use_envs ~extra_allowed_names =
   let after_cuts =
     List.map
       (fun (t, use_id, use_kind) ->
-        let level = TE.cut t ~unknown_if_defined_at_or_later_than in
+        let level = TE.cut t ~cut_after in
         t, use_id, use_kind, level)
       ts_and_use_ids
   in
-  let level =
+  let params = Bound_parameters.to_list params in
+  let level, alias_candidates =
     n_way_join ~env_at_fork:definition_typing_env after_cuts ~params
       ~extra_lifted_consts_in_use_envs ~extra_allowed_names
   in
-  TE.add_env_extension_from_level definition_typing_env level
-    ~meet_type:Meet_and_join.meet
+  let result_env =
+    TE.add_env_extension_from_level definition_typing_env level
+      ~meet_type:(Meet_and_join.meet_type ())
+  in
+  TE.compute_joined_aliases result_env alias_candidates
+    (List.map (fun (env_at_use, _, _, _) -> env_at_use) after_cuts)

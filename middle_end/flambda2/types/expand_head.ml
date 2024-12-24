@@ -14,11 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
-module Float = Numeric_types.Float_by_bit_pattern
-module Int32 = Numeric_types.Int32
-module Int64 = Numeric_types.Int64
 module K = Flambda_kind
 module MTC = More_type_creators
 module TE = Typing_env
@@ -34,6 +29,8 @@ module Expanded_type : sig
 
   val create_naked_immediate : Type_grammar.head_of_kind_naked_immediate -> t
 
+  val create_naked_float32 : Type_grammar.head_of_kind_naked_float32 -> t
+
   val create_naked_float : Type_grammar.head_of_kind_naked_float -> t
 
   val create_naked_int32 : Type_grammar.head_of_kind_naked_int32 -> t
@@ -42,7 +39,11 @@ module Expanded_type : sig
 
   val create_naked_nativeint : Type_grammar.head_of_kind_naked_nativeint -> t
 
+  val create_naked_vec128 : Type_grammar.head_of_kind_naked_vec128 -> t
+
   val create_rec_info : Type_grammar.head_of_kind_rec_info -> t
+
+  val create_region : Type_grammar.head_of_kind_region -> t
 
   val create_bottom : Flambda_kind.t -> t
 
@@ -61,11 +62,14 @@ module Expanded_type : sig
   type descr = private
     | Value of Type_grammar.head_of_kind_value
     | Naked_immediate of Type_grammar.head_of_kind_naked_immediate
+    | Naked_float32 of Type_grammar.head_of_kind_naked_float32
     | Naked_float of Type_grammar.head_of_kind_naked_float
     | Naked_int32 of Type_grammar.head_of_kind_naked_int32
     | Naked_int64 of Type_grammar.head_of_kind_naked_int64
     | Naked_nativeint of Type_grammar.head_of_kind_naked_nativeint
+    | Naked_vec128 of Type_grammar.head_of_kind_naked_vec128
     | Rec_info of Type_grammar.head_of_kind_rec_info
+    | Region of Type_grammar.head_of_kind_region
 
   val descr : t -> descr Or_unknown_or_bottom.t
 
@@ -73,6 +77,8 @@ module Expanded_type : sig
     | Value of Type_grammar.head_of_kind_value Or_unknown_or_bottom.t
     | Naked_immediate of
         Type_grammar.head_of_kind_naked_immediate Or_unknown_or_bottom.t
+    | Naked_float32 of
+        Type_grammar.head_of_kind_naked_float32 Or_unknown_or_bottom.t
     | Naked_float of
         Type_grammar.head_of_kind_naked_float Or_unknown_or_bottom.t
     | Naked_int32 of
@@ -81,18 +87,24 @@ module Expanded_type : sig
         Type_grammar.head_of_kind_naked_int64 Or_unknown_or_bottom.t
     | Naked_nativeint of
         Type_grammar.head_of_kind_naked_nativeint Or_unknown_or_bottom.t
+    | Naked_vec128 of
+        Type_grammar.head_of_kind_naked_vec128 Or_unknown_or_bottom.t
     | Rec_info of Type_grammar.head_of_kind_rec_info Or_unknown_or_bottom.t
+    | Region of Type_grammar.head_of_kind_region Or_unknown_or_bottom.t
 
   val descr_oub : t -> descr_oub
 end = struct
   type descr =
     | Value of TG.head_of_kind_value
     | Naked_immediate of TG.head_of_kind_naked_immediate
+    | Naked_float32 of TG.head_of_kind_naked_float32
     | Naked_float of TG.head_of_kind_naked_float
     | Naked_int32 of TG.head_of_kind_naked_int32
     | Naked_int64 of TG.head_of_kind_naked_int64
     | Naked_nativeint of TG.head_of_kind_naked_nativeint
+    | Naked_vec128 of TG.head_of_kind_naked_vec128
     | Rec_info of TG.head_of_kind_rec_info
+    | Region of TG.head_of_kind_region
 
   type t =
     { kind : K.t;
@@ -106,6 +118,9 @@ end = struct
   let create_naked_immediate head =
     { kind = K.naked_immediate; descr = Ok (Naked_immediate head) }
 
+  let create_naked_float32 head =
+    { kind = K.naked_float32; descr = Ok (Naked_float32 head) }
+
   let create_naked_float head =
     { kind = K.naked_float; descr = Ok (Naked_float head) }
 
@@ -118,7 +133,12 @@ end = struct
   let create_naked_nativeint head =
     { kind = K.naked_nativeint; descr = Ok (Naked_nativeint head) }
 
+  let create_naked_vec128 head =
+    { kind = K.naked_vec128; descr = Ok (Naked_vec128 head) }
+
   let create_rec_info head = { kind = K.rec_info; descr = Ok (Rec_info head) }
+
+  let create_region head = { kind = K.region; descr = Ok (Region head) }
 
   let create_bottom kind = { kind; descr = Bottom }
 
@@ -154,6 +174,15 @@ end = struct
         match TG.apply_coercion_head_of_kind_naked_immediate head coercion with
         | Bottom -> create_bottom K.naked_immediate
         | Ok head -> create_naked_immediate head))
+    | Naked_float32 Unknown -> create_unknown K.naked_float32
+    | Naked_float32 Bottom -> create_bottom K.naked_float32
+    | Naked_float32 (Ok (No_alias head)) -> (
+      match coercion with
+      | None -> create_naked_float32 head
+      | Some coercion -> (
+        match TG.apply_coercion_head_of_kind_naked_float32 head coercion with
+        | Bottom -> create_bottom K.naked_float32
+        | Ok head -> create_naked_float32 head))
     | Naked_float Unknown -> create_unknown K.naked_float
     | Naked_float Bottom -> create_bottom K.naked_float
     | Naked_float (Ok (No_alias head)) -> (
@@ -163,6 +192,15 @@ end = struct
         match TG.apply_coercion_head_of_kind_naked_float head coercion with
         | Bottom -> create_bottom K.naked_float
         | Ok head -> create_naked_float head))
+    | Naked_vec128 Unknown -> create_unknown K.naked_vec128
+    | Naked_vec128 Bottom -> create_bottom K.naked_vec128
+    | Naked_vec128 (Ok (No_alias head)) -> (
+      match coercion with
+      | None -> create_naked_vec128 head
+      | Some coercion -> (
+        match TG.apply_coercion_head_of_kind_naked_vec128 head coercion with
+        | Bottom -> create_bottom K.naked_vec128
+        | Ok head -> create_naked_vec128 head))
     | Naked_int32 Unknown -> create_unknown K.naked_int32
     | Naked_int32 Bottom -> create_bottom K.naked_int32
     | Naked_int32 (Ok (No_alias head)) -> (
@@ -199,13 +237,25 @@ end = struct
         match TG.apply_coercion_head_of_kind_rec_info head coercion with
         | Bottom -> create_bottom K.rec_info
         | Ok head -> create_rec_info head))
+    | Region Unknown -> create_unknown K.region
+    | Region Bottom -> create_bottom K.region
+    | Region (Ok (No_alias head)) -> (
+      match coercion with
+      | None -> create_region head
+      | Some coercion -> (
+        match TG.apply_coercion_head_of_kind_region head coercion with
+        | Bottom -> create_bottom K.region
+        | Ok head -> create_region head))
     | Value (Ok (Equals _))
     | Naked_immediate (Ok (Equals _))
     | Naked_float (Ok (Equals _))
+    | Naked_float32 (Ok (Equals _))
+    | Naked_vec128 (Ok (Equals _))
     | Naked_int32 (Ok (Equals _))
     | Naked_int64 (Ok (Equals _))
     | Naked_nativeint (Ok (Equals _))
-    | Rec_info (Ok (Equals _)) ->
+    | Rec_info (Ok (Equals _))
+    | Region (Ok (Equals _)) ->
       Misc.fatal_errorf "Type cannot be an alias type:@ %a" TG.print ty
 
   let to_type (t : t) =
@@ -216,16 +266,21 @@ end = struct
       match descr with
       | Value head -> TG.create_from_head_value head
       | Naked_immediate head -> TG.create_from_head_naked_immediate head
+      | Naked_float32 head -> TG.create_from_head_naked_float32 head
       | Naked_float head -> TG.create_from_head_naked_float head
       | Naked_int32 head -> TG.create_from_head_naked_int32 head
       | Naked_int64 head -> TG.create_from_head_naked_int64 head
       | Naked_nativeint head -> TG.create_from_head_naked_nativeint head
-      | Rec_info head -> TG.create_from_head_rec_info head)
+      | Naked_vec128 head -> TG.create_from_head_naked_vec128 head
+      | Rec_info head -> TG.create_from_head_rec_info head
+      | Region head -> TG.create_from_head_region head)
 
   type descr_oub =
     | Value of Type_grammar.head_of_kind_value Or_unknown_or_bottom.t
     | Naked_immediate of
         Type_grammar.head_of_kind_naked_immediate Or_unknown_or_bottom.t
+    | Naked_float32 of
+        Type_grammar.head_of_kind_naked_float32 Or_unknown_or_bottom.t
     | Naked_float of
         Type_grammar.head_of_kind_naked_float Or_unknown_or_bottom.t
     | Naked_int32 of
@@ -234,7 +289,10 @@ end = struct
         Type_grammar.head_of_kind_naked_int64 Or_unknown_or_bottom.t
     | Naked_nativeint of
         Type_grammar.head_of_kind_naked_nativeint Or_unknown_or_bottom.t
+    | Naked_vec128 of
+        Type_grammar.head_of_kind_naked_vec128 Or_unknown_or_bottom.t
     | Rec_info of Type_grammar.head_of_kind_rec_info Or_unknown_or_bottom.t
+    | Region of Type_grammar.head_of_kind_region Or_unknown_or_bottom.t
 
   let descr_oub t : descr_oub =
     match t.descr with
@@ -242,29 +300,36 @@ end = struct
       match t.kind with
       | Value -> Value Unknown
       | Naked_number Naked_immediate -> Naked_immediate Unknown
+      | Naked_number Naked_float32 -> Naked_float32 Unknown
       | Naked_number Naked_float -> Naked_float Unknown
       | Naked_number Naked_int32 -> Naked_int32 Unknown
       | Naked_number Naked_int64 -> Naked_int64 Unknown
       | Naked_number Naked_nativeint -> Naked_nativeint Unknown
+      | Naked_number Naked_vec128 -> Naked_vec128 Unknown
       | Rec_info -> Rec_info Unknown
-      | Fabricated -> Misc.fatal_error "Unused kind, to be removed")
+      | Region -> Region Unknown)
     | Bottom -> (
       match t.kind with
       | Value -> Value Bottom
       | Naked_number Naked_immediate -> Naked_immediate Bottom
+      | Naked_number Naked_float32 -> Naked_float32 Bottom
       | Naked_number Naked_float -> Naked_float Bottom
       | Naked_number Naked_int32 -> Naked_int32 Bottom
       | Naked_number Naked_int64 -> Naked_int64 Bottom
       | Naked_number Naked_nativeint -> Naked_nativeint Bottom
+      | Naked_number Naked_vec128 -> Naked_vec128 Bottom
       | Rec_info -> Rec_info Bottom
-      | Fabricated -> Misc.fatal_error "Unused kind, to be removed")
+      | Region -> Region Bottom)
     | Ok (Value head) -> Value (Ok head)
     | Ok (Naked_immediate head) -> Naked_immediate (Ok head)
+    | Ok (Naked_float32 head) -> Naked_float32 (Ok head)
     | Ok (Naked_float head) -> Naked_float (Ok head)
     | Ok (Naked_int32 head) -> Naked_int32 (Ok head)
     | Ok (Naked_int64 head) -> Naked_int64 (Ok head)
     | Ok (Naked_nativeint head) -> Naked_nativeint (Ok head)
+    | Ok (Naked_vec128 head) -> Naked_vec128 (Ok head)
     | Ok (Rec_info head) -> Rec_info (Ok head)
+    | Ok (Region head) -> Region (Ok head)
 end
 
 module ET = Expanded_type
@@ -287,15 +352,22 @@ let expand_head_of_alias_type env kind
       match Reg_width_const.descr const with
       | Naked_immediate i ->
         ET.create_naked_immediate
-          (TG.Head_of_kind_naked_immediate.create_naked_immediates
-             (Targetint_31_63.Set.singleton i))
+          (TG.Head_of_kind_naked_immediate.create_naked_immediate i)
       | Tagged_immediate i ->
         ET.create_value (TG.Head_of_kind_value.create_tagged_immediate i)
-      | Naked_float f -> ET.create_naked_float (Float.Set.singleton f)
-      | Naked_int32 i -> ET.create_naked_int32 (Int32.Set.singleton i)
-      | Naked_int64 i -> ET.create_naked_int64 (Int64.Set.singleton i)
+      | Naked_float32 f ->
+        ET.create_naked_float32 (TG.Head_of_kind_naked_float32.create f)
+      | Naked_float f ->
+        ET.create_naked_float (TG.Head_of_kind_naked_float.create f)
+      | Naked_int32 i ->
+        ET.create_naked_int32 (TG.Head_of_kind_naked_int32.create i)
+      | Naked_int64 i ->
+        ET.create_naked_int64 (TG.Head_of_kind_naked_int64.create i)
       | Naked_nativeint i ->
-        ET.create_naked_nativeint (Targetint_32_64.Set.singleton i))
+        ET.create_naked_nativeint (TG.Head_of_kind_naked_nativeint.create i)
+      | Naked_vec128 i ->
+        ET.create_naked_vec128 (TG.Head_of_kind_naked_vec128.create i)
+      | Null -> ET.create_value TG.Head_of_kind_value.null)
     ~name
 
 let expand_head0 env ty ~known_canonical_simple_at_in_types_mode =
@@ -311,9 +383,9 @@ let expand_head0 env ty ~known_canonical_simple_at_in_types_mode =
       ET.of_non_alias_type (MTC.unknown (TG.kind ty)))
 
 let expand_head env ty =
-  match TG.get_alias_exn ty with
-  | exception Not_found -> ET.of_non_alias_type ty
-  | simple -> (
+  match TG.get_alias_opt ty with
+  | None -> ET.of_non_alias_type ty
+  | Some simple -> (
     let kind = TG.kind ty in
     match
       TE.get_canonical_simple_exn env simple ~min_name_mode:Name_mode.in_types
@@ -331,6 +403,11 @@ let is_bottom env t = ET.is_bottom (expand_head env t)
 
 let is_unknown env t = ET.is_unknown (expand_head env t)
 
+let is_alias_to_a_symbol t =
+  match TG.get_alias_opt t with
+  | None -> false
+  | Some simple -> Simple.is_symbol simple
+
 let missing_kind env free_names =
   Name_occurrences.fold_variables free_names ~init:false
     ~f:(fun missing_kind var ->
@@ -342,22 +419,26 @@ type to_erase =
 
 exception Missing_cmx_file
 
-let free_variables_transitive env already_seen ty =
-  let rec free_variables_transitive0 ty ~result =
+let free_variables_transitive ~free_names_of_type env free_vars_acc ty =
+  let rec free_variables_transitive0 ty ~free_vars_acc =
     (* We don't need to look at symbols because the assumption (see the .mli) is
        that all symbols have valid types in the target environment. *)
-    let free_vars = TG.free_names ty |> Name_occurrences.with_only_variables in
+    let free_vars =
+      free_names_of_type ty |> Name_occurrences.with_only_variables
+    in
     if missing_kind env free_vars
     then raise Missing_cmx_file
     else
-      let to_traverse = Name_occurrences.diff free_vars result in
-      let result = Name_occurrences.union result to_traverse in
-      Name_occurrences.fold_names to_traverse ~init:result
-        ~f:(fun result name ->
+      let to_traverse =
+        Name_occurrences.diff free_vars ~without:free_vars_acc
+      in
+      let free_vars_acc = Name_occurrences.union free_vars_acc free_vars in
+      Name_occurrences.fold_names to_traverse ~init:free_vars_acc
+        ~f:(fun free_vars_acc name ->
           let ty = TE.find env name None in
-          free_variables_transitive0 ty ~result)
+          free_variables_transitive0 ty ~free_vars_acc)
   in
-  free_variables_transitive0 ty ~result:already_seen
+  free_variables_transitive0 ty ~free_vars_acc
 
 let make_suitable_for_environment env (to_erase : to_erase) bind_to_and_types =
   (match to_erase with
@@ -389,9 +470,15 @@ let make_suitable_for_environment env (to_erase : to_erase) bind_to_and_types =
   else
     (* Now collect all of the free variables, transitively (see comment on
        function above). *)
+    let root_types = List.map snd bind_to_and_types in
     match
-      bind_to_and_types |> List.map snd
-      |> List.fold_left (free_variables_transitive env) Name_occurrences.empty
+      ( List.fold_left
+          (free_variables_transitive ~free_names_of_type:TG.free_names env)
+          Name_occurrences.empty root_types,
+        List.fold_left
+          (free_variables_transitive
+             ~free_names_of_type:TG.free_names_except_through_value_slots env)
+          Name_occurrences.empty root_types )
     with
     | exception Missing_cmx_file ->
       (* Just forget everything if there is a .cmx file missing. *)
@@ -399,46 +486,98 @@ let make_suitable_for_environment env (to_erase : to_erase) bind_to_and_types =
         (fun result (bind_to, ty) ->
           TEEV.add_or_replace_equation result bind_to (MTC.unknown_like ty))
         TEEV.empty bind_to_and_types
-    | free_vars ->
+    | free_vars, free_vars_except_through_value_slots ->
       (* Determine which variables will be unavailable and thus need fresh ones
          assigning to them. *)
-      let unavailable_vars =
-        match to_erase with
-        | Everything_not_in suitable_for ->
-          Name_occurrences.fold_variables free_vars ~init:[]
-            ~f:(fun unavailable_vars var ->
-              if not (TE.mem suitable_for (Name.var var))
-              then var :: unavailable_vars
-              else unavailable_vars)
-        | All_variables_except to_keep ->
-          Name_occurrences.fold_variables free_vars ~init:[]
-            ~f:(fun unavailable_vars var ->
-              if not (Variable.Set.mem var to_keep)
-              then var :: unavailable_vars
-              else unavailable_vars)
+      let ( unavailable_vars_renamed,
+            unavailable_vars_expanded,
+            unavailable_vars_removed ) =
+        let erase var =
+          match to_erase with
+          | Everything_not_in suitable_for ->
+            not (TE.mem suitable_for (Name.var var))
+          | All_variables_except to_keep -> not (Variable.Set.mem var to_keep)
+        in
+        Name_occurrences.fold_variables free_vars ~init:([], [], [])
+          ~f:(fun
+               (( unavailable_vars_renamed,
+                  unavailable_vars_expanded,
+                  unavailable_vars_removed ) as unavailable_vars)
+               var
+             ->
+            if erase var
+            then
+              if Name_occurrences.mem_var free_vars_except_through_value_slots
+                   var
+              then
+                match Name_occurrences.count_variable free_vars var with
+                | Zero ->
+                  Misc.fatal_errorf
+                    "Inconsistent occurrences of %a in free names"
+                    Variable.print var
+                | One ->
+                  ( unavailable_vars_renamed,
+                    var :: unavailable_vars_expanded,
+                    unavailable_vars_removed )
+                | More_than_one ->
+                  ( var :: unavailable_vars_renamed,
+                    unavailable_vars_expanded,
+                    unavailable_vars_removed )
+              else
+                ( unavailable_vars_renamed,
+                  unavailable_vars_expanded,
+                  var :: unavailable_vars_removed )
+            else unavailable_vars)
       in
       (* Fetch the type equation for each free variable. Also add in the
          equations about the "bind-to" names provided to this function. If any
          of the "bind-to" names are already defined in [env], the type given in
-         [bind_to_and_types] takes precedence over such definition. *)
+         [bind_to_and_types] takes precedence over such definition. All
+         occurrences of variables that only occur once are expanded directly.
+         All occurrences of variables that are only reachable through closure
+         variables are replaced with an Unknown type. *)
+      let to_expand = Variable.Set.of_list unavailable_vars_expanded in
+      let to_remove = Variable.Set.of_list unavailable_vars_removed in
+      let to_project = Variable.Set.union to_expand to_remove in
+      let expand_type ty =
+        let rec expand var =
+          let ty = TE.find env (Name.var var) None in
+          if Variable.Set.mem var to_remove
+          then MTC.unknown_like ty
+          else
+            match TG.get_alias_exn ty with
+            | exception Not_found ->
+              TG.project_variables_out ~to_project ~expand ty
+            | simple ->
+              Simple.pattern_match' simple
+                ~const:(fun _ -> ty)
+                ~symbol:(fun _ ~coercion:_ -> ty)
+                ~var:(fun var ~coercion ->
+                  if Variable.Set.mem var to_expand
+                  then TG.apply_coercion (expand var) coercion
+                  else ty)
+        in
+        TG.project_variables_out ~to_project ~expand ty
+      in
       let equations =
-        ListLabels.fold_left unavailable_vars ~init:[] ~f:(fun equations var ->
+        ListLabels.fold_left unavailable_vars_renamed ~init:[]
+          ~f:(fun equations var ->
             let name = Name.var var in
             let ty = TE.find env name None in
-            (name, ty) :: equations)
+            (name, expand_type ty) :: equations)
       in
       let equations =
         List.fold_left
           (fun equations (bind_to, ty) ->
             (* The [bind_to] variables are not expected to be unavailable, so
                this shouldn't cause duplicates. *)
-            (bind_to, ty) :: equations)
+            (bind_to, expand_type ty) :: equations)
           equations bind_to_and_types
       in
       (* Make fresh variables for the unavailable variables and form a
          renaming. *)
       let unavailable_to_fresh_vars =
-        List.map (fun var -> var, Variable.rename var) unavailable_vars
+        List.map (fun var -> var, Variable.rename var) unavailable_vars_renamed
         |> Variable.Map.of_list
       in
       let renaming =
@@ -447,32 +586,6 @@ let make_suitable_for_environment env (to_erase : to_erase) bind_to_and_types =
             Renaming.add_fresh_variable renaming unavailable_var
               ~guaranteed_fresh:fresh_var)
           unavailable_to_fresh_vars Renaming.empty
-      in
-      (* For any type equation specifying an alias type, if that alias will be
-         unavailable, then expand the head of the type. Note that this cannot
-         yield any more variables that we haven't seen already, by virtue of the
-         semantics of [free_variables_transitive], above. *)
-      let equations =
-        List.map
-          (fun ((lhs, ty) as equation) ->
-            let ty' =
-              match TG.get_alias_exn ty with
-              | exception Not_found -> ty
-              | alias ->
-                (* Care: the alias may contain a coercion, which could contain a
-                   variable. *)
-                let contains_unavailable_var =
-                  Name_occurrences.fold_variables (Simple.free_names alias)
-                    ~init:false ~f:(fun contains_unavailable_var var ->
-                      contains_unavailable_var
-                      || Variable.Map.mem var unavailable_to_fresh_vars)
-                in
-                if contains_unavailable_var
-                then expand_head env ty |> ET.to_type
-                else ty
-            in
-            if ty == ty' then equation else lhs, ty')
-          equations
       in
       (* Now replace any unavailable variables with their fresh counterparts, on
          both sides of the equations map. At the same time identify which

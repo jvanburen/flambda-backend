@@ -16,8 +16,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 (** Things that a primitive does to the world, or expects from the world. *)
 
 type t =
@@ -60,3 +58,5 @@ val compare : t -> t -> int
 (** join two effects, effectively computing the maximum of the two given
     effects. *)
 val join : t -> t -> t
+
+val from_lambda : Primitive.effects -> t

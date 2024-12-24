@@ -14,10 +14,9 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 type t =
-  { scrutinee : Simple.t;
+  { condition_dbg : Debuginfo.t;
+    scrutinee : Simple.t;
     arms : Apply_cont_expr.t Targetint_31_63.Map.t
   }
 
@@ -55,63 +54,61 @@ let print_arms ppf arms =
     (fun (action, discrs) ->
       if !spc then fprintf ppf "@ " else spc := true;
       let discrs = Targetint_31_63.Set.elements discrs in
-      fprintf ppf "@[<hov 2>@[<hov 0>| %a @<0>%s\u{21a6}@<0>%s@ @]%a@]"
+      fprintf ppf "@[<hov 2>@[<hov 0>| %a %t\u{21a6}%t@ @]%a@]"
         (Format.pp_print_list
            ~pp_sep:(fun ppf () -> Format.fprintf ppf "@ | ")
            Targetint_31_63.print)
-        discrs (Flambda_colours.elide ())
-        (Flambda_colours.normal ())
-        Apply_cont_expr.print action)
+        discrs Flambda_colours.elide Flambda_colours.pop Apply_cont_expr.print
+        action)
     arms
 
-let [@ocamlformat "disable"] print ppf { scrutinee; arms; } =
-  fprintf ppf
-    "@[<v 0>(@<0>%sswitch@<0>%s %a@ @[<v 0>%a@])@]"
-    (Flambda_colours.expr_keyword ())
-    (Flambda_colours.normal ())
-    Simple.print scrutinee
-    print_arms arms
+let print ppf { condition_dbg; scrutinee; arms } =
+  fprintf ppf "@[<v 0>(%tswitch%t %a%s%t%a%t@ @[<v 0>%a@])@]"
+    Flambda_colours.expr_keyword Flambda_colours.pop Simple.print scrutinee
+    (if Debuginfo.is_none condition_dbg then "" else " ")
+    Flambda_colours.debuginfo Debuginfo.print_compact condition_dbg
+    Flambda_colours.pop print_arms arms
 
-let create ~scrutinee ~arms = { scrutinee; arms }
+let create ~condition_dbg ~scrutinee ~arms = { condition_dbg; scrutinee; arms }
 
-let if_then_else ~scrutinee ~if_true ~if_false =
+let if_then_else ~condition_dbg ~scrutinee ~if_true ~if_false =
   let arms =
     Targetint_31_63.Map.of_list
       [Targetint_31_63.bool_true, if_true; Targetint_31_63.bool_false, if_false]
   in
-  create ~scrutinee ~arms
+  create ~condition_dbg ~scrutinee ~arms
 
 let iter t ~f = Targetint_31_63.Map.iter f t.arms
 
 let num_arms t = Targetint_31_63.Map.cardinal t.arms
 
+let condition_dbg t = t.condition_dbg
+
 let scrutinee t = t.scrutinee
 
 let arms t = t.arms
 
-let free_names { scrutinee; arms } =
-  let free_names_in_arms =
-    Targetint_31_63.Map.fold
-      (fun _discr action free_names ->
-        Name_occurrences.union (Apply_cont_expr.free_names action) free_names)
-      arms Name_occurrences.empty
-  in
-  Name_occurrences.union (Simple.free_names scrutinee) free_names_in_arms
+let free_names { condition_dbg = _; scrutinee; arms } =
+  let free_names_of_scrutinee = Simple.free_names scrutinee in
+  Targetint_31_63.Map.fold
+    (fun _discr action free_names ->
+      Name_occurrences.union (Apply_cont_expr.free_names action) free_names)
+    arms free_names_of_scrutinee
 
-let apply_renaming ({ scrutinee; arms } as t) perm =
-  let scrutinee' = Simple.apply_renaming scrutinee perm in
+let apply_renaming ({ condition_dbg; scrutinee; arms } as t) renaming =
+  let scrutinee' = Simple.apply_renaming scrutinee renaming in
   let arms' =
     Targetint_31_63.Map.map_sharing
-      (fun action -> Apply_cont_expr.apply_renaming action perm)
+      (fun action -> Apply_cont_expr.apply_renaming action renaming)
       arms
   in
   if scrutinee == scrutinee' && arms == arms'
   then t
-  else { scrutinee = scrutinee'; arms = arms' }
+  else { condition_dbg; scrutinee = scrutinee'; arms = arms' }
 
-let all_ids_for_export { scrutinee; arms } =
+let ids_for_export { condition_dbg = _; scrutinee; arms } =
   let scrutinee_ids = Ids_for_export.from_simple scrutinee in
   Targetint_31_63.Map.fold
     (fun _discr action ids ->
-      Ids_for_export.union ids (Apply_cont_expr.all_ids_for_export action))
+      Ids_for_export.union ids (Apply_cont_expr.ids_for_export action))
     arms scrutinee_ids

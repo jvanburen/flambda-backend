@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 type t =
   | Mutable
   | Immutable
@@ -35,6 +33,8 @@ val compare : t -> t -> int
 
 val join : t -> t -> t
 
-val to_lambda : t -> Asttypes.mutable_flag
+val to_asttypes : t -> Asttypes.mutable_flag
+
+val from_lambda : Lambda.mutable_flag -> t
 
 val is_mutable : t -> bool

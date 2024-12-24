@@ -14,41 +14,83 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 open! Simplify_import
 
-let simplify_array_set original_prim (array_kind : P.Array_kind.t) dacc dbg
-    ~array_ty ~result_var =
-  let elt_kind = P.Array_kind.element_kind array_kind |> K.With_subkind.kind in
+let simplify_array_set (array_kind : P.Array_kind.t)
+    (array_set_kind : P.Array_set_kind.t) dacc ~original_term dbg ~arg1:array
+    ~arg1_ty:array_ty ~arg2:index ~arg2_ty:_ ~arg3:new_value ~arg3_ty:_
+    ~result_var =
+  let orig_array_kind = array_kind in
   let array_kind =
     Simplify_common.specialise_array_kind dacc array_kind ~array_ty
   in
-  (* CR-someday mshinwell: should do a meet on the new value too *)
   match array_kind with
-  | Bottom ->
-    let ty = T.bottom K.value (* Unit *) in
-    let dacc = DA.add_variable dacc result_var ty in
-    Simplified_named.invalid (), dacc
+  | Bottom -> SPR.create_invalid dacc
   | Ok array_kind ->
-    let elt_kind' =
-      P.Array_kind.element_kind array_kind |> K.With_subkind.kind
+    let () =
+      match array_kind with
+      | Immediates -> ()
+      | Values -> (
+        match array_set_kind with
+        | Values _ -> ()
+        | Immediates
+        (* We don't expect specialisation regressions from Immediates to
+           Values. *)
+        | Naked_floats | Naked_float32s | Naked_int32s | Naked_int64s
+        | Naked_nativeints | Naked_vec128s ->
+          Misc.fatal_errorf
+            "Didn't expect array specialisation to yield array kind %a from \
+             array set kind %a (original array kind %a):@ %a"
+            P.Array_kind.print array_kind P.Array_set_kind.print array_set_kind
+            P.Array_kind.print orig_array_kind Named.print original_term)
+      | Naked_floats | Naked_float32s | Naked_int32s | Naked_int64s
+      | Naked_nativeints | Naked_vec128s | Unboxed_product _ ->
+        ()
     in
-    assert (K.equal elt_kind elt_kind');
-    let named = Named.create_prim original_prim dbg in
-    let ty = T.unknown (P.result_kind' original_prim) in
-    let dacc = DA.add_variable dacc result_var ty in
-    Simplified_named.reachable named ~try_reify:false, dacc
+    let named =
+      Named.create_prim
+        (Ternary
+           (Array_set (array_kind, array_set_kind), array, index, new_value))
+        dbg
+    in
+    let unit_ty = Flambda2_types.this_tagged_immediate Targetint_31_63.zero in
+    let dacc = DA.add_variable dacc result_var unit_ty in
+    SPR.create named ~try_reify:false dacc
+
+let simplify_bytes_or_bigstring_set _bytes_like_value _string_accessor_width
+    dacc ~original_term _dbg ~arg1:_ ~arg1_ty:_ ~arg2:_ ~arg2_ty:_ ~arg3:_
+    ~arg3_ty:_ ~result_var =
+  SPR.create_unit dacc ~result_var ~original_term
+
+let simplify_bigarray_set ~num_dimensions:_ _bigarray_kind _bigarray_layout dacc
+    ~original_term _dbg ~arg1:_ ~arg1_ty:_ ~arg2:_ ~arg2_ty:_ ~arg3:_ ~arg3_ty:_
+    ~result_var =
+  SPR.create_unit dacc ~result_var ~original_term
+
+let simplify_atomic_compare_and_set ~original_prim dacc ~original_term _dbg
+    ~arg1:_ ~arg1_ty:_ ~arg2:_ ~arg2_ty:_ ~arg3:_ ~arg3_ty:_ ~result_var =
+  SPR.create_unknown dacc ~result_var
+    (P.result_kind' original_prim)
+    ~original_term
+
+let simplify_atomic_compare_exchange ~original_prim dacc ~original_term _dbg
+    ~arg1:_ ~arg1_ty:_ ~arg2:_ ~arg2_ty:_ ~arg3:_ ~arg3_ty:_ ~result_var =
+  SPR.create_unknown dacc ~result_var
+    (P.result_kind' original_prim)
+    ~original_term
 
 let simplify_ternary_primitive dacc original_prim (prim : P.ternary_primitive)
-    ~arg1 ~arg1_ty ~arg2 ~arg2_ty:_ ~arg3 ~arg3_ty:_ dbg ~result_var =
-  match prim with
-  | Array_set (array_kind, _init_or_assign) ->
-    simplify_array_set original_prim array_kind dacc dbg ~array_ty:arg1_ty
-      ~result_var
-  | Block_set _ | Bytes_or_bigstring_set _ | Bigarray_set _ ->
-    let prim : P.t = Ternary (prim, arg1, arg2, arg3) in
-    let named = Named.create_prim prim dbg in
-    let ty = T.unknown (P.result_kind' prim) in
-    let dacc = DA.add_variable dacc result_var ty in
-    Simplified_named.reachable named ~try_reify:false, dacc
+    ~arg1 ~arg1_ty ~arg2 ~arg2_ty ~arg3 ~arg3_ty dbg ~result_var =
+  let original_term = Named.create_prim original_prim dbg in
+  let simplifier =
+    match prim with
+    | Array_set (array_kind, width) -> simplify_array_set array_kind width
+    | Bytes_or_bigstring_set (bytes_like_value, string_accessor_width) ->
+      simplify_bytes_or_bigstring_set bytes_like_value string_accessor_width
+    | Bigarray_set (num_dimensions, bigarray_kind, bigarray_layout) ->
+      simplify_bigarray_set ~num_dimensions bigarray_kind bigarray_layout
+    | Atomic_compare_and_set -> simplify_atomic_compare_and_set ~original_prim
+    | Atomic_compare_exchange -> simplify_atomic_compare_exchange ~original_prim
+  in
+  simplifier dacc ~original_term dbg ~arg1 ~arg1_ty ~arg2 ~arg2_ty ~arg3
+    ~arg3_ty ~result_var

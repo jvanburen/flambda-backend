@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 module DE = Downwards_env
 module LC = Lifted_constant
 module T = Flambda2_types
@@ -24,27 +22,26 @@ module TE = T.Typing_env
 type t =
   | Empty
   | Leaf of LC.t
-  | Leaf_array of { innermost_first : LC.t array }
+  | Leaf_array of { ts : LC.t array }
   | Union of
-      { outer : t;
-        inner : t
+      { t1 : t;
+        t2 : t
       }
 
-let to_list_outermost_first t =
-  let rec to_list t acc =
-    match t with
-    | Empty -> acc
-    | Leaf const -> const :: acc
-    | Leaf_array { innermost_first } ->
-      List.rev (Array.to_list innermost_first) @ acc
-    | Union { inner; outer } -> to_list outer (to_list inner acc)
+let print ppf t =
+  let to_list t =
+    let rec to_list t acc =
+      match t with
+      | Empty -> acc
+      | Leaf const -> const :: acc
+      | Leaf_array { ts } -> List.rev (Array.to_list ts) @ acc
+      | Union { t2; t1 } -> to_list t1 (to_list t2 acc)
+    in
+    to_list t []
   in
-  to_list t []
-
-let [@ocamlformat "disable"] print ppf t =
-  Format.fprintf ppf "@[<hov 1>(outermost_first@ %a)@]"
+  Format.fprintf ppf "@[<hov 1>(%a)@]"
     (Format.pp_print_list ~pp_sep:Format.pp_print_space LC.print)
-    (to_list_outermost_first t)
+    (to_list t)
 
 let empty = Empty
 
@@ -53,62 +50,37 @@ let is_empty t =
 
 let singleton const = Leaf const
 
-let singleton_sorted_array_of_constants ~innermost_first =
-  if Array.length innermost_first < 1
-  then empty
-  else Leaf_array { innermost_first }
+let singleton_list_of_constants constants =
+  match constants with
+  | [] -> empty
+  | [constant] -> singleton constant
+  | _ :: _ -> Leaf_array { ts = Array.of_list constants }
 
-let singleton_list_of_constants_order_does_not_matter constants =
-  singleton_sorted_array_of_constants ~innermost_first:(Array.of_list constants)
+let add t const =
+  if is_empty t then Leaf const else Union { t2 = Leaf const; t1 = t }
 
-let union_ordered ~innermost ~outermost =
-  match innermost, outermost with
-  | Empty, _ -> outermost
-  | _, Empty -> innermost
-  | inner, outer -> Union { inner; outer }
+let union t1 t2 =
+  match t1, t2 with
+  | Empty, Empty -> Empty
+  | Empty, (Leaf _ | Leaf_array _ | Union _) -> t2
+  | (Leaf _ | Leaf_array _ | Union _), Empty -> t1
+  | (Leaf _ | Leaf_array _ | Union _), t2 -> Union { t2 = t1; t1 = t2 }
 
-let union t1 t2 = union_ordered ~innermost:t1 ~outermost:t2
-
-let add_innermost t const =
-  if is_empty t then Leaf const else Union { inner = Leaf const; outer = t }
-
-let add_outermost t const =
-  if is_empty t then Leaf const else Union { outer = Leaf const; inner = t }
-
-let add = add_innermost
-
-let rec fold_outermost_first t ~init ~f =
+let rec fold t ~init ~f =
   match t with
   | Empty -> init
   | Leaf const -> f init const
-  | Leaf_array { innermost_first } ->
-    (* Avoid [Array.fold_right] as it would require a closure allocation. *)
-    let acc = ref init in
-    for i = Array.length innermost_first - 1 downto 0 do
-      acc := f !acc innermost_first.(i)
-    done;
-    !acc
-  | Union { inner; outer } ->
-    let init = fold_outermost_first outer ~init ~f in
-    fold_outermost_first inner ~init ~f
-
-let rec fold_innermost_first t ~init ~f =
-  match t with
-  | Empty -> init
-  | Leaf const -> f init const
-  | Leaf_array { innermost_first } ->
-    ArrayLabels.fold_left innermost_first ~init ~f
-  | Union { inner; outer } ->
-    let init = fold_innermost_first inner ~init ~f in
-    fold_innermost_first outer ~init ~f
-
-let fold = fold_innermost_first
+  | Leaf_array { ts } -> ArrayLabels.fold_left ts ~init ~f
+  | Union { t2; t1 } ->
+    let init = fold t2 ~init ~f in
+    fold t1 ~init ~f
 
 let all_defined_symbols t =
   fold t ~init:Symbol.Set.empty ~f:(fun symbols const ->
       LC.all_defined_symbols const |> Symbol.Set.union symbols)
 
 let add_to_denv ?maybe_already_defined denv lifted =
+  let initial_denv = denv in
   let maybe_already_defined =
     match maybe_already_defined with None -> false | Some () -> true
   in
@@ -128,19 +100,19 @@ let add_to_denv ?maybe_already_defined denv lifted =
         let types_of_symbols = LC.types_of_symbols lifted_constant in
         Symbol.Map.fold
           (fun sym (denv_at_definition, typ) typing_env ->
-            if maybe_already_defined && DE.mem_symbol denv sym
+            if maybe_already_defined && DE.mem_symbol initial_denv sym
             then typing_env
             else
               let sym = Name.symbol sym in
               let env_extension =
-                (* CR-someday mshinwell: Sometimes we might already have the
-                   types "made suitable" in the [closure_env] field of the
-                   typing environment, perhaps? For example when lifted
-                   constants' types are coming out of a closure into the
-                   enclosing scope. *)
+                (* CR mshinwell: Maybe sometimes this could be done at a time
+                   previous to this point. *)
+                (* CR pchambart: Maybe some of these make_suitable calls could
+                   be combined into one *)
                 T.make_suitable_for_environment
                   (DE.typing_env denv_at_definition)
-                  (Everything_not_in typing_env) [sym, typ]
+                  (Everything_not_in typing_env)
+                  [sym, typ]
               in
               TE.add_env_extension_with_extra_variables typing_env env_extension)
           types_of_symbols typing_env)
@@ -159,7 +131,7 @@ let add_to_denv ?maybe_already_defined denv lifted =
         pieces_of_code denv)
 
 module CIS = Code_id_or_symbol
-module SCC_lifted_constants = Strongly_connected_components_flambda2.Make (CIS)
+module SCC_lifted_constants = Strongly_connected_components.Make (CIS)
 
 let build_dep_graph t =
   fold t ~init:(CIS.Map.empty, CIS.Map.empty)
@@ -178,7 +150,7 @@ let build_dep_graph t =
                  closure symbols (in the current set) to all of the others (in
                  the current set). *)
               ListLabels.fold_left
-                (Closure_id.Lmap.data closure_symbols_with_types)
+                (Function_slot.Lmap.data closure_symbols_with_types)
                 ~init:free_names ~f:(fun free_names (symbol, _) ->
                   Name_occurrences.add_symbol free_names symbol Name_mode.normal)
           in
@@ -193,7 +165,7 @@ let build_dep_graph t =
               (CIS.set_of_code_id_set free_code_ids)
           in
           let being_defined =
-            D.bound_symbols definition |> Bound_symbols.everything_being_defined
+            D.bound_static definition |> Bound_static.everything_being_defined
           in
           CIS.Set.fold
             (fun being_defined (dep_graph, code_id_or_symbol_to_const) ->
@@ -207,6 +179,16 @@ let build_dep_graph t =
             being_defined
             (dep_graph, code_id_or_symbol_to_const)))
 
+let remove_values_not_in_domain (m : CIS.Set.t CIS.Map.t) =
+  CIS.Map.map
+    (fun values ->
+      (* CR lmaurer: This should use a map/set intersection function, which
+         should be easy to define with the Patricia tree refactor *)
+      CIS.Set.filter (fun value -> CIS.Map.mem value m) values)
+    m
+
+type sort_result = { innermost_first : LC.t array }
+
 let sort0 t =
   (* The various lifted constants may exhibit recursion between themselves
      (specifically between closures and/or code). We use SCC to obtain a
@@ -214,6 +196,16 @@ let sort0 t =
      code-and-set-of-closures definitions. *)
   let lifted_constants_dep_graph, code_id_or_symbol_to_const =
     build_dep_graph t
+  in
+  let lifted_constants_dep_graph =
+    (* This graph has vertices for all code ids and symbols that appear free in
+       the definitions, including pre-existing ones. However, any such "external
+       vertex" is a leaf, and in fact it won't even appear as a key in the map
+       representation of the graph. However, [SCC_lifted_constants] assumes that
+       all vertices appear as keys. Fortunately, we're only concerned with the
+       interdependencies between code ids and symbols being defined here, so we
+       can just filter out external dependencies from the graph. *)
+    remove_values_not_in_domain lifted_constants_dep_graph
   in
   let innermost_first =
     lifted_constants_dep_graph
@@ -238,21 +230,19 @@ let sort0 t =
                         once, in the case of sets of closures, which may bind
                         more than one symbol. We must avoid duplicates in the
                         resulting [LC.t]. *)
-                     let bound_symbols = LC.bound_symbols lifted_constant in
+                     let bound_static = LC.bound_static lifted_constant in
                      CIS.Set.union
-                       (Bound_symbols.everything_being_defined bound_symbols)
+                       (Bound_static.everything_being_defined bound_static)
                        already_seen
                    in
                    already_seen, lifted_constant :: definitions)
            in
            LC.concat lifted_constants)
   in
-  (* We may wish to traverse the array of constants in either direction.
-   * This can be done by virtue of the following property:
-   *   Let the list/array L be a topological sort of a directed graph G.
-   *   Then the reverse of L is a topological sort of the transpose of G.
-   *)
-  singleton_sorted_array_of_constants ~innermost_first
+  { innermost_first }
 
 let sort t =
-  match t with Empty | Leaf _ -> t | Leaf_array _ | Union _ -> sort0 t
+  match t with
+  | Empty -> { innermost_first = [||] }
+  | Leaf const -> { innermost_first = [| const |] }
+  | Leaf_array _ | Union _ -> sort0 t

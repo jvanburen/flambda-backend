@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 type t =
   | Mutable
   | Immutable
@@ -49,13 +47,17 @@ let join t1 t2 =
   | (Immutable | Immutable_unique), Mutable ->
     Mutable
 
-(* CR mshinwell: This function should be renamed, or else produce
-   Lambda.mutable_flag *)
-let to_lambda t : Asttypes.mutable_flag =
+let to_asttypes t : Asttypes.mutable_flag =
   match t with
   | Mutable -> Mutable
   | Immutable -> Immutable
   | Immutable_unique -> Immutable
+
+let from_lambda (flag : Lambda.mutable_flag) : t =
+  match flag with
+  | Mutable -> Mutable
+  | Immutable -> Immutable
+  | Immutable_unique -> Immutable_unique
 
 let is_mutable t =
   match t with Mutable -> true | Immutable | Immutable_unique -> false

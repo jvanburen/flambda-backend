@@ -3,10 +3,9 @@
 (library
  (name flambda2_to_cmm)
  (wrapped true)
+ (instrumentation (backend bisect_ppx))
  (flags
   (:standard
-   -principal
-   -nostdlib
    -open
    Flambda2_bound_identifiers
    -open
@@ -30,9 +29,8 @@
    -open
    Flambda2_ui))
  (ocamlopt_flags
-  (:standard -O3))
+  (:standard -O3 -open Int_replace_polymorphic_compare))
  (libraries
-  stdlib
   ocamlcommon
   ocamloptcomp
   flambda2_bound_identifiers

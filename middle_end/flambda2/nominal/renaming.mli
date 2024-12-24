@@ -17,10 +17,13 @@
 (** Handling of permutations and import freshening upon all kinds of bindable
     names and other identifiers (e.g. constants).
 
+    We use permutations instead of substitutions because they cannot
+    accidentally disturb the binding structure of terms. See [Name_abstraction].
+
     Unlike [Name_occurrences] this module does not segregate names according to
     where they occur (e.g. in terms or in types). *)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
+module Simple = Int_ids.Simple
 
 type t
 
@@ -28,18 +31,20 @@ val empty : t
 
 val print : Format.formatter -> t -> unit
 
-val is_empty : t -> bool
+val is_identity : t -> bool
 
 val create_import_map :
   symbols:Symbol.t Symbol.Map.t ->
   variables:Variable.t Variable.Map.t ->
-  simples:Reg_width_things.Simple.t Reg_width_things.Simple.Map.t ->
-  consts:Reg_width_things.Const.t Reg_width_things.Const.Map.t ->
+  simples:Simple.t Simple.Map.t ->
+  consts:Reg_width_const.t Reg_width_const.Map.t ->
   code_ids:Code_id.t Code_id.Map.t ->
   continuations:Continuation.t Continuation.Map.t ->
-  used_closure_vars:Var_within_closure.Set.t ->
+  used_value_slots:Value_slot.Set.t ->
   original_compilation_unit:Compilation_unit.t ->
   t
+
+val has_import_map : t -> bool
 
 (** Note that [compose] is not commutative on the permutation component. The
     permutation in the result of [compose ~second ~first] is that permutation
@@ -79,9 +84,8 @@ val add_fresh_code_id : t -> Code_id.t -> guaranteed_fresh:Code_id.t -> t
 val apply_code_id : t -> Code_id.t -> Code_id.t
 
 (* This is only used by the importing code. We don't permute constants. *)
-val apply_const : t -> Reg_width_things.Const.t -> Reg_width_things.Const.t
+val apply_const : t -> Reg_width_const.t -> Reg_width_const.t
 
-val apply_simple : t -> Reg_width_things.Simple.t -> Reg_width_things.Simple.t
+val apply_simple : t -> Simple.t -> Simple.t
 
-(* CR mshinwell: See CR in the implementation about this function. *)
-val closure_var_is_used : t -> Var_within_closure.t -> bool
+val value_slot_is_used : t -> Value_slot.t -> bool

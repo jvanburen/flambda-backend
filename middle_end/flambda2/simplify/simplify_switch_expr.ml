@@ -14,408 +14,643 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 open! Simplify_import
+module TE = Flambda2_types.Typing_env
+module TI = Targetint_31_63
+module Alias_set = TE.Alias_set
 
-let rebuild_arm uacc arm (action, use_id, arity)
-    (new_let_conts, arms, identity_arms, not_arms) =
+type mergeable_arms =
+  | No_arms
+  | Mergeable of
+      { cont : Continuation.t;
+        args : Alias_set.t list
+      }
+  | Not_mergeable
+
+let find_all_aliases env arg =
+  let find_all_aliases () =
+    TE.aliases_of_simple env ~min_name_mode:NM.normal arg
+  in
+  Simple.pattern_match'
+    ~var:(fun _var ~coercion:_ ->
+      (* We use find alias to find a common simple to different
+         simples.
+
+         This simple is already guaranteed to be the cannonical alias.
+
+       * If there is a common alias between variables, the
+         cannonical alias must also be a common alias.
+
+       * For constants and symbols there can be a common alias that
+         is not cannonical: A variable can have different constant
+         values in different branches: this variable is not the
+         cannonical alias, the cannonical would be the constant or
+         the symbol. But the only common alias could be a variable
+         in that case.
+
+         hence there is no loss of generality in returning the
+         cannonical alias as the single alias if it is a variable.
+
+         Note that the main reason for this is to allow changing the
+         arguments of continuations to variables that where not in
+         scope during the downward traversal. In particular for the
+         alias rewriting provided by data_flow *)
+      TE.Alias_set.singleton arg)
+    ~symbol:(fun _sym ~coercion:_ -> find_all_aliases ())
+    ~const:(fun _cst -> find_all_aliases ())
+    arg
+
+let rebuild_arm uacc arm (action, use_id, arity, env_at_use)
+    ( new_let_conts,
+      arms,
+      (mergeable_arms : mergeable_arms),
+      identity_arms,
+      not_arms ) =
   let action =
     Simplify_common.clear_demoted_trap_action_and_patch_unused_exn_bucket uacc
       action
   in
-  match
-    EB.add_wrapper_for_switch_arm uacc action ~use_id
-      (Flambda_arity.With_subkinds.of_arity arity)
-  with
+  match EB.rewrite_switch_arm uacc action ~use_id arity with
+  | Invalid _ ->
+    (* The destination is unreachable; delete the [Switch] arm. *)
+    new_let_conts, arms, mergeable_arms, identity_arms, not_arms
   | Apply_cont action -> (
     let action =
+      let cont = Apply_cont.continuation action in
+      let cont_info_from_uenv = UE.find_continuation (UA.uenv uacc) cont in
       (* First try to absorb any [Apply_cont] expression that forms the entirety
          of the arm's action (via an intermediate zero-arity continuation
          without trap action) into the [Switch] expression itself. *)
-      if not (Apply_cont.is_goto action)
-      then Some action
-      else
-        let cont = Apply_cont.continuation action in
-        let check_handler ~handler ~action =
-          match RE.to_apply_cont handler with
-          | Some action -> Some action
-          | None -> Some action
-        in
-        match UE.find_continuation (UA.uenv uacc) cont with
-        | Linearly_used_and_inlinable
-            { handler;
-              free_names_of_handler = _;
-              params;
-              cost_metrics_of_handler = _
-            } ->
-          assert (List.length params = 0);
-          check_handler ~handler ~action
-        | Non_inlinable_zero_arity { handler = Known handler } ->
-          check_handler ~handler ~action
-        | Non_inlinable_zero_arity { handler = Unknown } -> Some action
-        | Unreachable _ -> None
-        | Non_inlinable_non_zero_arity _
-        | Toplevel_or_function_return_or_exn_continuation _ ->
-          Misc.fatal_errorf
-            "Inconsistency for %a between [Apply_cont.is_goto] and \
-             continuation environment in [UA]:@ %a"
-            Continuation.print cont UA.print uacc
+      match cont_info_from_uenv with
+      | Invalid _ -> None
+      | Linearly_used_and_inlinable _ | Non_inlinable_zero_arity _
+      | Non_inlinable_non_zero_arity _
+      | Toplevel_or_function_return_or_exn_continuation _ -> (
+        if not (Apply_cont.is_goto action)
+        then Some action
+        else
+          let check_handler ~handler ~action =
+            match RE.to_apply_cont handler with
+            | Some action -> Some action
+            | None -> Some action
+          in
+          match cont_info_from_uenv with
+          | Linearly_used_and_inlinable
+              { handler;
+                free_names_of_handler = _;
+                params;
+                cost_metrics_of_handler = _
+              } ->
+            assert (Bound_parameters.is_empty params);
+            check_handler ~handler ~action
+          | Non_inlinable_zero_arity { handler = Known handler } ->
+            check_handler ~handler ~action
+          | Non_inlinable_zero_arity { handler = Unknown } -> Some action
+          | Invalid _ | Toplevel_or_function_return_or_exn_continuation _ ->
+            None
+          | Non_inlinable_non_zero_arity _ ->
+            Misc.fatal_errorf
+              "Inconsistency for %a between [Apply_cont.is_goto] and \
+               continuation environment in [UA]:@ %a"
+              Continuation.print cont UA.print uacc)
     in
     match action with
     | None ->
       (* The destination is unreachable; delete the [Switch] arm. *)
-      new_let_conts, arms, identity_arms, not_arms
+      new_let_conts, arms, mergeable_arms, identity_arms, not_arms
     | Some action -> (
-      let normal_case ~identity_arms ~not_arms =
-        let arms = Targetint_31_63.Map.add arm action arms in
-        new_let_conts, arms, identity_arms, not_arms
+      (* CR mshinwell/vlaviron: Fix alias handling so that identity switches
+         like those in id_switch.ml can be simplified by only using
+         [mergeable_arms]. Then remove [identity_arms]. *)
+      let maybe_mergeable ~mergeable_arms ~identity_arms ~not_arms =
+        let arms = TI.Map.add arm action arms in
+        (* Check to see if this arm may be merged with others. *)
+        if Option.is_some (Apply_cont.trap_action action)
+        then new_let_conts, arms, Not_mergeable, identity_arms, not_arms
+        else
+          match mergeable_arms with
+          | Not_mergeable ->
+            new_let_conts, arms, Not_mergeable, identity_arms, not_arms
+          | No_arms ->
+            let cont = Apply_cont.continuation action in
+            let args =
+              List.map
+                (fun arg -> find_all_aliases env_at_use arg)
+                (Apply_cont.args action)
+            in
+            ( new_let_conts,
+              arms,
+              Mergeable { cont; args },
+              identity_arms,
+              not_arms )
+          | Mergeable { cont; args } ->
+            if not (Continuation.equal cont (Apply_cont.continuation action))
+            then new_let_conts, arms, Not_mergeable, identity_arms, not_arms
+            else
+              let args =
+                List.map2
+                  (fun arg_set arg ->
+                    Alias_set.inter (find_all_aliases env_at_use arg) arg_set)
+                  args (Apply_cont.args action)
+              in
+              ( new_let_conts,
+                arms,
+                Mergeable { cont; args },
+                identity_arms,
+                not_arms )
       in
-      (* Now check to see if the arm is of a form that might mean the whole
-         [Switch] is either the identity or a boolean NOT. *)
+      (* Check to see if the arm is of a form that might mean the whole [Switch]
+         is a boolean NOT. *)
       match Apply_cont.to_one_arg_without_trap_action action with
-      | None -> normal_case ~identity_arms ~not_arms
+      | None -> maybe_mergeable ~mergeable_arms ~identity_arms ~not_arms
       | Some arg ->
-        (* CR-someday mshinwell: Maybe this check should be generalised
-         * e.g. to detect
-         *   | 0 -> apply_cont k x y 1
-         *   | 1 -> apply_cont k x y 0
-         *)
         let[@inline always] const arg =
           match Reg_width_const.descr arg with
           | Tagged_immediate arg ->
-            if Targetint_31_63.equal arm arg
+            if TI.equal arm arg
             then
-              let identity_arms =
-                Targetint_31_63.Map.add arm action identity_arms
-              in
-              normal_case ~identity_arms ~not_arms
-            else if Targetint_31_63.equal arm Targetint_31_63.bool_true
-                    && Targetint_31_63.equal arg Targetint_31_63.bool_false
-                    || Targetint_31_63.equal arm Targetint_31_63.bool_false
-                       && Targetint_31_63.equal arg Targetint_31_63.bool_true
+              let identity_arms = TI.Map.add arm action identity_arms in
+              maybe_mergeable ~mergeable_arms ~identity_arms ~not_arms
+            else if (TI.equal arm TI.bool_true && TI.equal arg TI.bool_false)
+                    || (TI.equal arm TI.bool_false && TI.equal arg TI.bool_true)
             then
-              let not_arms = Targetint_31_63.Map.add arm action not_arms in
-              normal_case ~identity_arms ~not_arms
-            else normal_case ~identity_arms ~not_arms
-          | Naked_immediate _ | Naked_float _ | Naked_int32 _ | Naked_int64 _
-          | Naked_nativeint _ ->
-            normal_case ~identity_arms ~not_arms
+              let not_arms = TI.Map.add arm action not_arms in
+              maybe_mergeable ~mergeable_arms ~identity_arms ~not_arms
+            else maybe_mergeable ~mergeable_arms ~identity_arms ~not_arms
+          | Naked_immediate _ | Naked_float _ | Naked_float32 _ | Naked_int32 _
+          | Naked_int64 _ | Naked_vec128 _ | Naked_nativeint _ | Null ->
+            maybe_mergeable ~mergeable_arms ~identity_arms ~not_arms
         in
         Simple.pattern_match arg ~const ~name:(fun _ ~coercion:_ ->
-            normal_case ~identity_arms ~not_arms)))
-  | New_wrapper
-      (new_cont, new_handler, free_names_of_handler, cost_metrics_handler) ->
-    let new_let_cont =
-      new_cont, new_handler, free_names_of_handler, cost_metrics_handler
-    in
+            maybe_mergeable ~mergeable_arms ~identity_arms ~not_arms)))
+  | New_wrapper new_let_cont ->
     let new_let_conts = new_let_cont :: new_let_conts in
-    let action = Apply_cont.goto new_cont in
-    let arms = Targetint_31_63.Map.add arm action arms in
-    new_let_conts, arms, identity_arms, not_arms
+    let action = Apply_cont.goto new_let_cont.cont in
+    let arms = TI.Map.add arm action arms in
+    new_let_conts, arms, Not_mergeable, identity_arms, not_arms
 
-let rebuild_switch ~simplify_let dacc ~arms ~scrutinee ~scrutinee_ty uacc
-    ~after_rebuild =
-  let new_let_conts, arms, identity_arms, not_arms =
-    Targetint_31_63.Map.fold (rebuild_arm uacc) arms
-      ( [],
-        Targetint_31_63.Map.empty,
-        Targetint_31_63.Map.empty,
-        Targetint_31_63.Map.empty )
+let filter_and_choose_alias required_names alias_set =
+  let available_alias_set =
+    Alias_set.filter alias_set ~f:(fun alias ->
+        Simple.pattern_match alias
+          ~name:(fun name ~coercion:_ -> Name.Set.mem name required_names)
+          ~const:(fun _ -> true))
   in
-  let switch_is_identity =
-    let arm_discrs = Targetint_31_63.Map.keys arms in
-    let identity_arms_discrs = Targetint_31_63.Map.keys identity_arms in
-    if not (Targetint_31_63.Set.equal arm_discrs identity_arms_discrs)
-    then None
-    else
-      Targetint_31_63.Map.data identity_arms
-      |> List.map Apply_cont.continuation
-      |> Continuation.Set.of_list |> Continuation.Set.get_singleton
-  in
-  let switch_is_boolean_not =
-    let arm_discrs = Targetint_31_63.Map.keys arms in
-    let not_arms_discrs = Targetint_31_63.Map.keys not_arms in
-    if (not (Targetint_31_63.Set.equal arm_discrs Targetint_31_63.all_bools))
-       || not (Targetint_31_63.Set.equal arm_discrs not_arms_discrs)
-    then None
-    else
-      Targetint_31_63.Map.data not_arms
-      |> List.map Apply_cont.continuation
-      |> Continuation.Set.of_list |> Continuation.Set.get_singleton
-  in
-  let create_tagged_scrutinee uacc dest ~make_body =
-    (* A problem with using [simplify_let] below is that the continuation [dest]
-       might have [Apply_cont_rewrite]s in the environment, left over from the
-       simplification of the existing uses. We must clear these to avoid a
-       lookup failure for our new [Apply_cont] when [Simplify_apply_cont] tries
-       to rewrite the use. There is no need for the rewrites anyway; they have
-       already been applied. It is of course necessary to restore any rewrite
-       before returning [uacc], since the surrounding context may need it.
+  Alias_set.find_best available_alias_set
 
-       Likewise, we need to clear the continuation uses environment for [dest]
-       in [dacc], since our new [Apply_cont] might not match the original uses
-       (e.g. if a parameter has been removed). *)
-    let rewrite = UE.find_apply_cont_rewrite (UA.uenv uacc) dest in
-    let uacc =
-      UA.map_uenv uacc ~f:(fun uenv -> UE.delete_apply_cont_rewrite uenv dest)
-    in
-    let dacc = DA.delete_continuation_uses dacc dest in
-    let bound_to = Variable.create "tagged_scrutinee" in
-    let body = make_body ~tagged_scrutinee:(Simple.var bound_to) in
-    let bound_to = Bound_var.create bound_to NM.normal in
-    let defining_expr =
-      Named.create_prim
-        (Unary (Box_number Untagged_immediate, scrutinee))
-        Debuginfo.none
-    in
-    let let_expr =
-      Let.create
-        (Bound_pattern.singleton bound_to)
-        defining_expr ~body ~free_names_of_body:Unknown
-    in
-    simplify_let dacc let_expr ~down_to_up:(fun _dacc ~rebuild ->
-        rebuild uacc ~after_rebuild:(fun expr uacc ->
-            let uacc =
-              match rewrite with
-              | None -> uacc
-              | Some rewrite ->
-                UA.map_uenv uacc ~f:(fun uenv ->
-                    UE.add_apply_cont_rewrite uenv dest rewrite)
-            in
-            expr, uacc))
-  in
-  let body, uacc =
-    if Targetint_31_63.Map.cardinal arms < 1
-    then
-      let uacc = UA.notify_removed ~operation:Removed_operations.branch uacc in
-      RE.create_invalid (), uacc
-    else
-      let dbg = Debuginfo.none in
-      match switch_is_identity with
-      | Some dest ->
-        let uacc =
-          UA.notify_removed ~operation:Removed_operations.branch uacc
-        in
-        let make_body ~tagged_scrutinee =
-          (* No need to increment the cost_metrics inside
-             [create_tagged_scrutinee] as it will call simplify over the result
-             of [make_body]. *)
-          Apply_cont.create dest ~args:[tagged_scrutinee] ~dbg
-          |> Expr.create_apply_cont
-        in
-        create_tagged_scrutinee uacc dest ~make_body
-      | None -> (
-        match switch_is_boolean_not with
-        | Some dest ->
-          let uacc =
-            UA.notify_removed ~operation:Removed_operations.branch uacc
-          in
-          let make_body ~tagged_scrutinee =
-            let not_scrutinee = Variable.create "not_scrutinee" in
-            let not_scrutinee' = Simple.var not_scrutinee in
-            let do_tagging =
-              Named.create_prim
-                (P.Unary (Boolean_not, tagged_scrutinee))
-                Debuginfo.none
-            in
-            let bound =
-              VB.create not_scrutinee NM.normal |> Bound_pattern.singleton
-            in
-            let body =
-              Apply_cont.create dest ~args:[not_scrutinee'] ~dbg
-              |> Expr.create_apply_cont
-            in
-            Let.create bound do_tagging ~body ~free_names_of_body:Unknown
-            |> Expr.create_let
-          in
-          create_tagged_scrutinee uacc dest ~make_body
-        | None ->
-          (* In that case, even though some branches were removed by simplify we
-             should not count them in the number of removed operations: these
-             branches wouldn't have been taken during execution anyway. *)
-          let expr, uacc = EB.create_switch uacc ~scrutinee ~arms in
-          if Flambda_features.check_invariants ()
-             && Simple.is_const scrutinee
-             && Targetint_31_63.Map.cardinal arms > 1
-          then
-            Misc.fatal_errorf
-              "[Switch] with constant scrutinee (type: %a) should have been \
-               simplified away:@ %a"
-              T.print scrutinee_ty
-              (RE.print (UA.are_rebuilding_terms uacc))
-              expr;
-          expr, uacc)
-  in
-  let bind_let_cont (uacc, body)
-      (new_cont, new_handler, free_names_of_handler, cost_metrics_of_handler) =
-    let free_names_of_body = UA.name_occurrences uacc in
-    let expr =
-      RE.create_non_recursive_let_cont
-        (UA.are_rebuilding_terms uacc)
-        new_cont new_handler ~body ~free_names_of_body
-    in
-    let name_occurrences =
-      Name_occurrences.remove_continuation
-        (Name_occurrences.union free_names_of_body free_names_of_handler)
-        new_cont
-    in
-    let uacc =
-      UA.with_name_occurrences uacc ~name_occurrences
-      |> UA.add_cost_metrics
-           (Cost_metrics.increase_due_to_let_cont_non_recursive
-              ~cost_metrics_of_handler)
-    in
-    uacc, expr
-  in
-  let uacc, expr =
-    ListLabels.fold_left new_let_conts ~init:(uacc, body) ~f:bind_let_cont
-  in
-  after_rebuild expr uacc
-
-let find_cse_simple dacc prim =
+let find_cse_simple dacc required_names prim =
   match P.Eligible_for_cse.create prim with
   | None -> None (* Constant *)
   | Some with_fixed_value -> (
     match DE.find_cse (DA.denv dacc) with_fixed_value with
     | None -> None
-    | Some simple -> (
-      match
-        TE.get_canonical_simple_exn (DA.typing_env dacc) simple
-          ~min_name_mode:NM.normal ~name_mode_of_existing_simple:NM.normal
-      with
-      | exception Not_found -> None
-      | simple -> Some simple))
+    | Some simple ->
+      filter_and_choose_alias required_names
+        (find_all_aliases (DA.typing_env dacc) simple))
 
-let check_cse_environment dacc ~scrutinee =
-  (* When the switch is an identity or a NOT, the expression is rewritten to
-     remove the switch during the upwards pass. The switch is replaced by either
-     a tagging or a boolean NOT and a tagging. The result of the tagging can be
-     a variable for which dependencies are not tracked by data_flow the usual
-     way during simplification of lets. This could be benign, if a new
-     expression to compute it was always introduced here, because there is
-     already a dependency registered on the scrutinee. But if CSE replaces it by
-     a variable that is only used here, we can create a real new dependency that
-     didn't exist before. For example: *)
-  (*
-   *   let untagged = untag x
-   *   apply_cont k untagged (cse_arg tag(untagged) = x)
-   *   where k x cse_param =
-   *     switch x
-   *     | 0 -> apply_cont k2 0
-   *     | 1 -> apply_cont k2 1
-   *
-   *  would be rewritten to:
-   *
-   *   let untagged = untag x
-   *   apply_cont k untagged (cse_arg tag(untagged) = x)
-   *   where k x cse_param =
-   *     let tagged = tag x
-   *     apply_cont k2 tagged
-   *
-   * And with CSE:
-   *
-   *   let untagged = untag x
-   *   apply_cont k untagged (cse_arg tag(untagged) = x)
-   *   where k x cse_param =
-   *     apply_cont k2 cse_param
-   *)
-  (* If the tracking were not done properly, cse_param could be considered dead
-     and removed from the parameters of continuation k.
+type must_untag_lookup_table_result =
+  | Must_untag
+  | Leave_as_tagged_immediate
 
-     We solve this by always looking for a tagged version of the scrutinee in
-     the CSE environment and registering it as a required variable like the
-     scrutinee. If it is not available, no problem can occur. *)
-  match
-    find_cse_simple dacc (Unary (Box_number Untagged_immediate, scrutinee))
-  with
-  | None -> dacc
-  | Some tagged_scrutinee -> (
-    let dacc =
-      DA.map_data_flow dacc
-        ~f:
-          (Data_flow.add_used_in_current_handler
-             (Simple.free_names tagged_scrutinee))
+(* Recognise sufficiently-large Switch expressions where all of the arms provide
+   a single argument to a unique destination. These expressions can be compiled
+   using lookup tables, which dramatically reduces code size. *)
+let recognize_switch_with_single_arg_to_same_destination0 ~arms =
+  let check_arm discr dest dest_and_args_rev_and_expected_discr =
+    let dest' = AC.continuation dest in
+    match dest_and_args_rev_and_expected_discr with
+    | None -> None
+    | Some (expected_dest, args_rev, expected_discr) -> (
+      match expected_dest with
+      | Some expected_dest when not (Continuation.equal dest' expected_dest) ->
+        (* All arms must go to the same continuation. *)
+        None
+      | _ when not (TI.equal discr expected_discr) ->
+        (* Discriminants must be 0..(num_arms-1) (note that it is possible to
+           have Switches that do not satisfy this criterion in Flambda 2). *)
+        None
+      | Some _ | None -> (
+        match AC.to_one_arg_without_trap_action dest with
+        | None ->
+          (* The destination continuations must have single constant arguments.
+             Trap actions are forbidden. *)
+          None
+        | Some arg ->
+          Simple.pattern_match arg
+            ~name:(fun _ ~coercion:_ ->
+              (* Aliases should have been followed by now. *) None)
+            ~const:(fun const ->
+              let expected_discr = TI.add TI.one expected_discr in
+              Some (Some dest', const :: args_rev, expected_discr))))
+  in
+  match TI.Map.fold check_arm arms (Some (None, [], TI.zero)) with
+  | None | Some (None, _, _) | Some (_, [], _) -> None
+  | Some (Some dest, args_rev, _) -> (
+    let args = List.rev args_rev in
+    assert (List.compare_length_with args 1 >= 0);
+    (* For the moment just do this for things that can be put in scannable
+       blocks (which might then need untagging depending on how they appeared in
+       the original [Switch]). *)
+    let[@inline] check_args prover must_untag_lookup_table_result =
+      let args' = List.filter_map prover args in
+      if List.compare_lengths args args' = 0
+      then Some (dest, must_untag_lookup_table_result, args')
+      else None
     in
-    match find_cse_simple dacc (Unary (Boolean_not, tagged_scrutinee)) with
-    | None -> dacc
-    | Some not_scrutinee ->
-      DA.map_data_flow dacc
-        ~f:
-          (Data_flow.add_used_in_current_handler
-             (Simple.free_names not_scrutinee)))
+    (* All arguments must be of an appropriate kind and the same kind. *)
+    match Reg_width_const.descr (List.hd args) with
+    | Naked_immediate _ ->
+      check_args Reg_width_const.is_naked_immediate Must_untag
+    | Tagged_immediate _ ->
+      (* Note that even though the [Reg_width_const] is specifying a tagged
+         immediate, the value which we store inside values of that type is still
+         a normal untagged [TI.t]. *)
+      check_args Reg_width_const.is_tagged_immediate Leave_as_tagged_immediate
+    | Naked_float _ | Naked_float32 _ | Naked_int32 _ | Naked_int64 _
+    | Naked_nativeint _ | Naked_vec128 _ | Null ->
+      None)
+
+let recognize_switch_with_single_arg_to_same_destination ~arms =
+  (* Switch must be large enough. *)
+  if TI.Map.cardinal arms < 3
+  then None
+  else recognize_switch_with_single_arg_to_same_destination0 ~arms
+
+let rebuild_switch_with_single_arg_to_same_destination uacc ~dacc_before_switch
+    ~original ~tagged_scrutinee ~dest ~consts ~must_untag_lookup_table_result
+    dbg =
+  let rebuilding = UA.are_rebuilding_terms uacc in
+  let block_sym =
+    let var = Variable.create "switch_block" in
+    Symbol.create
+      (Compilation_unit.get_current_exn ())
+      (Linkage_name.of_string (Variable.unique_name var))
+  in
+  let uacc =
+    let fields =
+      List.map
+        (fun const -> Simple.With_debuginfo.create (Simple.const_int const) dbg)
+        consts
+    in
+    let block_type =
+      T.immutable_array ~element_kind:(Ok KS.tagged_immediate)
+        ~fields:
+          (List.map
+             (fun const ->
+               T.alias_type_of K.value
+                 (Simple.const (Reg_width_const.const_int const)))
+             consts)
+        Alloc_mode.For_types.heap
+    in
+    UA.add_lifted_constant uacc
+      (LC.create_definition
+         (LC.Definition.block_like
+            (DA.denv dacc_before_switch)
+            block_sym block_type ~symbol_projections:Variable.Map.empty
+            (RSC.create_immutable_value_array rebuilding fields)))
+  in
+  (* CR mshinwell: consider sharing the constants *)
+  let block = Simple.symbol block_sym in
+  let load_from_block_prim : P.t =
+    Binary (Array_load (Values, Values, Immutable), block, tagged_scrutinee)
+  in
+  let load_from_block = Named.create_prim load_from_block_prim dbg in
+  let arg_var = Variable.create "arg" in
+  let arg = Simple.var arg_var in
+  let final_arg_var, final_arg =
+    match must_untag_lookup_table_result with
+    | Must_untag ->
+      let final_arg_var = Variable.create "final_arg" in
+      final_arg_var, Simple.var final_arg_var
+    | Leave_as_tagged_immediate -> arg_var, arg
+  in
+  (* Note that, unlike for the untagging of normal Switch scrutinees, there's no
+     problem with CSE and Data_flow here. The reason is that in this case the
+     generated primitive always names a fresh variable, so it will never be
+     eligible for CSE. *)
+  (* CR mshinwell: we could probably expose the actual integer counts of
+     continuations in [Name_occurrences] and then try to inline out [dest]. This
+     might happen anyway in the backend though so this probably isn't that
+     important for now. *)
+  let apply_cont = Apply_cont.create dest ~args:[final_arg] ~dbg in
+  let free_names_of_body = Apply_cont.free_names apply_cont in
+  let untag_arg_prim : P.t = Unary (Untag_immediate, arg) in
+  let expr =
+    let body =
+      let body = RE.create_apply_cont apply_cont in
+      match must_untag_lookup_table_result with
+      | Leave_as_tagged_immediate -> body
+      | Must_untag ->
+        let bound = BPt.singleton (BV.create final_arg_var NM.normal) in
+        let untag_arg = Named.create_prim untag_arg_prim dbg in
+        RE.create_let rebuilding bound untag_arg ~body ~free_names_of_body
+    in
+    let bound = BPt.singleton (BV.create arg_var NM.normal) in
+    RE.create_let rebuilding bound load_from_block ~body ~free_names_of_body
+  in
+  let extra_free_names =
+    NO.union
+      (Named.free_names load_from_block)
+      (NO.remove_var free_names_of_body ~var:final_arg_var)
+  in
+  let increase_in_code_size =
+    (* Very likely negative. *)
+    Code_size.( - )
+      (Code_size.( + )
+         (Code_size.prim load_from_block_prim)
+         (Code_size.( + )
+            (Code_size.apply_cont apply_cont)
+            (match must_untag_lookup_table_result with
+            | Must_untag -> Code_size.prim untag_arg_prim
+            | Leave_as_tagged_immediate -> Code_size.zero)))
+      (Code_size.switch original)
+  in
+  let uacc =
+    UA.add_free_names uacc extra_free_names
+    (* CR mshinwell: it seems we need to fix [Cost_metrics] so we can note that
+       we have *added* operations here (load, maybe untagging). *)
+    |> UA.notify_added ~code_size:increase_in_code_size
+  in
+  expr, uacc
+
+let rebuild_switch ~original ~arms ~condition_dbg ~scrutinee ~scrutinee_ty
+    ~dacc_before_switch uacc ~after_rebuild =
+  let new_let_conts, arms, mergeable_arms, identity_arms, not_arms =
+    TI.Map.fold (rebuild_arm uacc) arms
+      ([], TI.Map.empty, No_arms, TI.Map.empty, TI.Map.empty)
+  in
+  let switch_merged =
+    match mergeable_arms with
+    | No_arms | Not_mergeable -> None
+    | Mergeable { cont; args } ->
+      let num_args = List.length args in
+      let required_names = UA.required_names uacc in
+      let args =
+        List.filter_map (filter_and_choose_alias required_names) args
+      in
+      if List.compare_length_with args num_args = 0
+      then Some (cont, args)
+      else None
+  in
+  let switch_is_identity =
+    let arm_discrs = TI.Map.keys arms in
+    let identity_arms_discrs = TI.Map.keys identity_arms in
+    if not (TI.Set.equal arm_discrs identity_arms_discrs)
+    then None
+    else
+      TI.Map.data identity_arms
+      |> List.map Apply_cont.continuation
+      |> Continuation.Set.of_list |> Continuation.Set.get_singleton
+  in
+  let switch_is_boolean_not =
+    let arm_discrs = TI.Map.keys arms in
+    let not_arms_discrs = TI.Map.keys not_arms in
+    if (not (TI.Set.equal arm_discrs TI.all_bools))
+       || not (TI.Set.equal arm_discrs not_arms_discrs)
+    then None
+    else
+      TI.Map.data not_arms
+      |> List.map Apply_cont.continuation
+      |> Continuation.Set.of_list |> Continuation.Set.get_singleton
+  in
+  let switch_is_single_arg_to_same_destination =
+    recognize_switch_with_single_arg_to_same_destination ~arms
+  in
+  let body, uacc =
+    if TI.Map.cardinal arms < 1
+    then
+      let uacc = UA.notify_removed ~operation:Removed_operations.branch uacc in
+      RE.create_invalid Zero_switch_arms, uacc
+    else
+      let dbg = Debuginfo.none in
+      let[@inline] normal_case0 uacc =
+        (* In that case, even though some branches were removed by simplify we
+           should not count them in the number of removed operations: these
+           branches wouldn't have been taken during execution anyway. *)
+        let expr, uacc =
+          EB.create_switch uacc ~condition_dbg ~scrutinee ~arms
+        in
+        if Flambda_features.check_invariants ()
+           && Simple.is_const scrutinee
+           && TI.Map.cardinal arms > 1
+        then
+          Misc.fatal_errorf
+            "[Switch] with constant scrutinee (type: %a) should have been \
+             simplified away:@ %a"
+            T.print scrutinee_ty
+            (RE.print (UA.are_rebuilding_terms uacc))
+            expr;
+        expr, uacc
+      in
+      let[@inline] normal_case uacc =
+        match switch_is_single_arg_to_same_destination with
+        | None -> normal_case0 uacc
+        | Some (dest, must_untag_lookup_table_result, consts) -> (
+          assert (List.length consts = TI.Map.cardinal arms);
+          let tagging_prim : P.t = Unary (Tag_immediate, scrutinee) in
+          match
+            find_cse_simple dacc_before_switch (UA.required_names uacc)
+              tagging_prim
+          with
+          | None -> normal_case0 uacc
+          | Some tagged_scrutinee ->
+            rebuild_switch_with_single_arg_to_same_destination uacc
+              ~dacc_before_switch ~original ~tagged_scrutinee ~dest ~consts
+              ~must_untag_lookup_table_result dbg)
+      in
+      match switch_merged with
+      | Some (dest, args) ->
+        let uacc =
+          UA.notify_removed ~operation:Removed_operations.branch uacc
+        in
+        let apply_cont = Apply_cont.create dest ~args ~dbg in
+        let expr = RE.create_apply_cont apply_cont in
+        let uacc = UA.add_free_names uacc (Apply_cont.free_names apply_cont) in
+        expr, uacc
+      | None -> (
+        match switch_is_identity with
+        | Some dest -> (
+          let uacc =
+            (* CR mshinwell: it seems like this should be registering the
+               potentially significant reduction in code size -- likewise in
+               other cases here. Plus the fact that some operations are
+               *added*. *)
+            UA.notify_removed ~operation:Removed_operations.branch uacc
+          in
+          let tagging_prim : P.t = Unary (Tag_immediate, scrutinee) in
+          match
+            find_cse_simple dacc_before_switch (UA.required_names uacc)
+              tagging_prim
+          with
+          | None -> normal_case uacc
+          | Some tagged_scrutinee ->
+            let apply_cont =
+              Apply_cont.create dest ~args:[tagged_scrutinee] ~dbg
+            in
+            let expr = RE.create_apply_cont apply_cont in
+            let uacc =
+              UA.add_free_names uacc (Apply_cont.free_names apply_cont)
+            in
+            expr, uacc)
+        | None -> (
+          match switch_is_boolean_not with
+          | Some dest -> (
+            let uacc =
+              UA.notify_removed ~operation:Removed_operations.branch uacc
+            in
+            let not_scrutinee = Variable.create "not_scrutinee" in
+            let not_scrutinee' = Simple.var not_scrutinee in
+            let tagging_prim : P.t = Unary (Tag_immediate, scrutinee) in
+            match
+              find_cse_simple dacc_before_switch (UA.required_names uacc)
+                tagging_prim
+            with
+            | None -> normal_case uacc
+            | Some tagged_scrutinee ->
+              let do_tagging =
+                Named.create_prim
+                  (P.Unary (Boolean_not, tagged_scrutinee))
+                  Debuginfo.none
+              in
+              let bound =
+                VB.create not_scrutinee NM.normal |> Bound_pattern.singleton
+              in
+              let apply_cont =
+                Apply_cont.create dest ~args:[not_scrutinee'] ~dbg
+              in
+              let body = RE.create_apply_cont apply_cont in
+              let free_names_of_body = Apply_cont.free_names apply_cont in
+              let expr =
+                RE.create_let
+                  (UA.are_rebuilding_terms uacc)
+                  bound do_tagging ~body ~free_names_of_body
+              in
+              let uacc =
+                UA.add_free_names uacc
+                  (NO.union
+                     (Named.free_names do_tagging)
+                     (NO.diff free_names_of_body
+                        ~without:(NO.singleton_variable not_scrutinee NM.normal)))
+              in
+              expr, uacc)
+          | None -> normal_case uacc))
+  in
+  let uacc, expr = EB.bind_let_conts uacc ~body new_let_conts in
+  after_rebuild expr uacc
 
 let simplify_arm ~typing_env_at_use ~scrutinee_ty arm action (arms, dacc) =
-  let shape =
-    let imm = Targetint_31_63.int (Targetint_31_63.to_targetint arm) in
-    T.this_naked_immediate imm
-  in
+  let shape = T.this_naked_immediate arm in
   match T.meet typing_env_at_use scrutinee_ty shape with
   | Bottom -> arms, dacc
-  | Ok (_meet_ty, env_extension) -> (
-    let env_at_use =
-      TE.add_env_extension typing_env_at_use env_extension
-      |> DE.with_typing_env (DA.denv dacc)
-    in
+  | Ok (_meet_ty, env_extension) ->
+    let env_at_use = TE.add_env_extension typing_env_at_use env_extension in
+    let denv_at_use = DE.with_typing_env (DA.denv dacc) env_at_use in
     let args = AC.args action in
     let use_kind =
       Simplify_common.apply_cont_use_kind ~context:Switch_branch action
     in
-    match args with
-    | [] ->
-      let dacc, rewrite_id =
-        DA.record_continuation_use dacc (AC.continuation action) use_kind
-          ~env_at_use ~arg_types:[]
-      in
-      let dacc =
-        DA.map_data_flow dacc
-          ~f:
-            (Data_flow.add_apply_cont_args
-               (Apply_cont.continuation action)
-               (List.map Simple.free_names args))
-      in
-      let arms = Targetint_31_63.Map.add arm (action, rewrite_id, []) arms in
-      arms, dacc
-    | _ :: _ ->
-      let { S.simples = args; simple_tys = arg_types } =
-        S.simplify_simples dacc args
-      in
-      let dacc, rewrite_id =
-        DA.record_continuation_use dacc (AC.continuation action) use_kind
-          ~env_at_use ~arg_types
-      in
-      let arity = List.map T.kind arg_types in
-      let action = Apply_cont.update_args action ~args in
-      let dacc =
-        DA.map_data_flow dacc
-          ~f:
-            (Data_flow.add_apply_cont_args
-               (Apply_cont.continuation action)
-               (List.map Simple.free_names args))
-      in
-      let arms = Targetint_31_63.Map.add arm (action, rewrite_id, arity) arms in
-      arms, dacc)
+    let { S.simples = args; simple_tys = arg_types } =
+      S.simplify_simples dacc args
+    in
+    let dacc, rewrite_id =
+      DA.record_continuation_use dacc (AC.continuation action) use_kind
+        ~env_at_use:denv_at_use ~arg_types
+    in
+    let arity =
+      arg_types
+      |> List.map (fun ty -> K.With_subkind.anything (T.kind ty))
+      |> Flambda_arity.create_singletons
+    in
+    let action = Apply_cont.update_args action ~args in
+    let dbg = AC.debuginfo action in
+    let dbg = DE.add_inlined_debuginfo (DA.denv dacc) dbg in
+    let action = AC.with_debuginfo action ~dbg in
+    let dacc =
+      DA.map_flow_acc dacc
+        ~f:
+          (Flow.Acc.add_apply_cont_args ~rewrite_id
+             (Apply_cont.continuation action)
+             args)
+    in
+    let arms = TI.Map.add arm (action, rewrite_id, arity, env_at_use) arms in
+    arms, dacc
 
-let simplify_switch ~simplify_let dacc switch ~down_to_up =
+let simplify_switch0 dacc switch ~down_to_up =
   let scrutinee = Switch.scrutinee switch in
-  let scrutinee_ty =
+  let scrutinee_ty, scrutinee =
     S.simplify_simple dacc scrutinee ~min_name_mode:NM.normal
   in
-  let scrutinee = T.get_alias_exn scrutinee_ty in
+  let dacc_before_switch = dacc in
   let typing_env_at_use = DA.typing_env dacc in
   let arms, dacc =
-    Targetint_31_63.Map.fold
+    TI.Map.fold
       (simplify_arm ~typing_env_at_use ~scrutinee_ty)
-      (Switch.arms switch)
-      (Targetint_31_63.Map.empty, dacc)
+      (Switch.arms switch) (TI.Map.empty, dacc)
   in
-  let dacc = check_cse_environment dacc ~scrutinee in
   let dacc =
-    if Targetint_31_63.Map.cardinal arms <= 1
+    if TI.Map.cardinal arms <= 1
     then dacc
     else
-      DA.map_data_flow dacc
-        ~f:(Data_flow.add_used_in_current_handler (Simple.free_names scrutinee))
+      DA.map_flow_acc dacc
+        ~f:(Flow.Acc.add_used_in_current_handler (Simple.free_names scrutinee))
+  in
+  let condition_dbg =
+    DE.add_inlined_debuginfo (DA.denv dacc) (Switch.condition_dbg switch)
+  in
+  let dacc =
+    match DA.are_lifting_conts dacc with
+    | Lifting_out_of _ ->
+      Misc.fatal_errorf
+        "[Are_lifting_cont] values in the dacc cannot be [Lifting_out_of _] \
+         when going downwards through a [Switch] expression. See the \
+         explanation in [are_lifting_conts.mli]."
+    | Not_lifting -> dacc
+    | Analyzing { continuation; uses = _ } ->
+      let denv = DA.denv dacc in
+      (* Estimate the cost of lifting: this mainly comes from adding new
+         parameters, which increase the work done by the typing env, as well as
+         the flow analysis. We then only do the lifting if the cost is within
+         the budget for the current function. *)
+      let budget = DA.get_continuation_lifting_budget dacc in
+      let cost = DE.cost_of_lifting_continuations_out_of_current_one denv in
+      if budget = 0 || budget < cost
+      then dacc
+      else
+        (* TODO/FIXME: implement an actual criterion for when to lift
+           continuations. Currently for testing, we lift any continuation that
+           occurs in a handler that ends with a switch. *)
+        DA.with_are_lifting_conts
+          (DA.decrease_continuation_lifting_budget dacc cost)
+          (Are_lifting_conts.lift_continuations_out_of continuation)
   in
   down_to_up dacc
-    ~rebuild:(rebuild_switch ~simplify_let dacc ~arms ~scrutinee ~scrutinee_ty)
+    ~rebuild:
+      (rebuild_switch ~original:switch ~arms ~condition_dbg ~scrutinee
+         ~scrutinee_ty ~dacc_before_switch)
+
+let simplify_switch ~simplify_let ~simplify_function_body dacc switch
+    ~down_to_up =
+  let tagged_scrutinee = Variable.create "tagged_scrutinee" in
+  let tagging_prim =
+    Named.create_prim
+      (Unary (Tag_immediate, Switch.scrutinee switch))
+      Debuginfo.none
+  in
+  let let_expr =
+    (* [body] won't be looked at (see below). *)
+    Let.create
+      (Bound_pattern.singleton (Bound_var.create tagged_scrutinee NM.normal))
+      tagging_prim
+      ~body:(Expr.create_switch switch)
+      ~free_names_of_body:Unknown
+  in
+  let dacc =
+    DA.map_flow_acc dacc
+      ~f:
+        (Flow.Acc.add_used_in_current_handler
+           (NO.singleton_variable tagged_scrutinee NM.normal))
+  in
+  simplify_let
+    ~simplify_expr:(fun dacc _body ~down_to_up ->
+      simplify_switch0 dacc switch ~down_to_up)
+    ~simplify_function_body dacc let_expr ~down_to_up

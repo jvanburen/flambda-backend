@@ -13,15 +13,21 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 module C = Code
+
+type raw = Code_or_metadata.raw Code_id.Map.t
 
 type t = Code_or_metadata.t Code_id.Map.t
 
 let print ppf t = Code_id.Map.print Code_or_metadata.print ppf t
 
 let empty = Code_id.Map.empty
+
+let free_names t =
+  Code_id.Map.fold
+    (fun _code_id code acc ->
+      Name_occurrences.union acc (Code_or_metadata.free_names code))
+    t Name_occurrences.empty
 
 let add_code ~keep_code code_map t =
   Code_id.Map.mapi
@@ -53,14 +59,14 @@ let find t code_id =
   match Code_id.Map.find code_id t with
   | exception Not_found ->
     (* In some cases a code ID is created, the corresponding closure stored into
-       another closure, but the corresponding closure variable ends up never
+       another closure, but the variable bound to the closure ends up never
        being used and so the initial code ID and closure are removed, but the
-       type of the second closure still mentions its closure variable and its
-       contents (eventually pointing to the code ID). Ideally the type should be
-       patched to remove the unused closure variable before computing
-       reachability, but for now this is done during import instead so we can
-       end up with missing code IDs during the reachability computation, and
-       have to assume that it fits the above case.
+       type of the second closure still describes the first closure and
+       eventually points to its code ID. Ideally the type should be patched to
+       remove such references before computing reachability, but for now this is
+       done during import instead so we can end up with missing code IDs during
+       the reachability computation, and have to assume that it fits the above
+       case.
 
        The other situation where this returns [None] is when we are looking
        during the export reachability computation for a piece of deleted code.
@@ -75,23 +81,25 @@ let remove_unreachable ~reachable_names t =
       Name_occurrences.mem_code_id reachable_names code_id)
     t
 
-let remove_unused_closure_vars_from_result_types ~used_closure_vars t =
+let remove_unused_value_slots_from_result_types_and_shortcut_aliases
+    ~used_value_slots ~canonicalise t =
   Code_id.Map.map
     (fun code_or_metadata ->
       Code_or_metadata.map_result_types code_or_metadata ~f:(fun result_ty ->
-          Flambda2_types.remove_unused_closure_vars result_ty ~used_closure_vars))
+          Flambda2_types.remove_unused_value_slots_and_shortcut_aliases
+            result_ty ~used_value_slots ~canonicalise))
     t
 
-let all_ids_for_export t =
+let ids_for_export t =
   Code_id.Map.fold
     (fun code_id code_or_metadata all_ids ->
       Ids_for_export.union
         (Ids_for_export.add_code_id all_ids code_id)
-        (Code_or_metadata.all_ids_for_export code_or_metadata))
+        (Code_or_metadata.ids_for_export code_or_metadata))
     t Ids_for_export.empty
 
 let apply_renaming code_id_map renaming t =
-  if Renaming.is_empty renaming && Code_id.Map.is_empty code_id_map
+  if Renaming.is_identity renaming && Code_id.Map.is_empty code_id_map
   then t
   else
     Code_id.Map.fold
@@ -112,3 +120,12 @@ let iter_code t ~f =
     (fun _code_id code_or_metadata ->
       Code_or_metadata.iter_code code_or_metadata ~f)
     t
+
+let from_raw ~sections t =
+  Code_id.Map.map (Code_or_metadata.from_raw ~sections) t
+
+let to_raw ~add_section t =
+  Code_id.Map.map (Code_or_metadata.to_raw ~add_section) t
+
+let map_raw_index map_index t =
+  Code_id.Map.map (Code_or_metadata.map_raw_index map_index) t

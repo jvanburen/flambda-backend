@@ -24,8 +24,6 @@
    isn't any potential for confusion with extra continuation arguments added as
    a result of unboxing. *)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 type t
 
 include Container_types.S with type t := t
@@ -48,7 +46,7 @@ val extra_args : t -> (Simple.t * Flambda_kind.With_subkind.t) list
 
 (** The arity of the given exception continuation, taking into account both the
     exception bucket argument and any [extra_args]. *)
-val arity : t -> Flambda_arity.With_subkinds.t
+val arity : t -> [> `Unarized] Flambda_arity.t
 
 val with_exn_handler : t -> Continuation.t -> t
 

@@ -23,8 +23,6 @@
    but in the body of a loop can be distinguished from those that are really
    only used once in a program. *)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 type t
 
 val empty : t
@@ -37,13 +35,16 @@ val equal : t -> t -> bool
 
 val apply_renaming : t -> Renaming.t -> t
 
+include Contains_ids.S with type t := t
+
+(** True if and only if [not (equal (apply_renaming t renaming) t)] *)
+val affected_by_renaming : t -> Renaming.t -> bool
+
 val singleton_continuation : Continuation.t -> t
 
 val singleton_continuation_in_trap_action : Continuation.t -> t
 
 val add_continuation : t -> Continuation.t -> has_traps:bool -> t
-
-val add_continuation_in_trap_action : t -> Continuation.t -> t
 
 val count_continuation : t -> Continuation.t -> Num_occurrences.t
 
@@ -61,9 +62,19 @@ val add_symbol : t -> Symbol.t -> Name_mode.t -> t
 
 val add_name : t -> Name.t -> Name_mode.t -> t
 
-val add_closure_id : t -> Closure_id.t -> Name_mode.t -> t
+val add_function_slot_in_projection : t -> Function_slot.t -> Name_mode.t -> t
 
-val add_closure_var : t -> Var_within_closure.t -> Name_mode.t -> t
+val add_value_slot_in_projection : t -> Value_slot.t -> Name_mode.t -> t
+
+val add_function_slot_in_declaration : t -> Function_slot.t -> Name_mode.t -> t
+
+val add_value_slot_in_declaration : t -> Value_slot.t -> Name_mode.t -> t
+
+(** Closure_variables and function slots in types count as both projection and
+    declaration *)
+val add_function_slot_in_types : t -> Function_slot.t -> t
+
+val add_value_slot_in_types : t -> Value_slot.t -> t
 
 val singleton_code_id : Code_id.t -> Name_mode.t -> t
 
@@ -81,27 +92,25 @@ val singleton_symbol : Symbol.t -> Name_mode.t -> t
 
 val create_variables : Variable.Set.t -> Name_mode.t -> t
 
-val create_variables' : Name_mode.t -> Variable.Set.t -> t
-
 val create_names : Name.Set.t -> Name_mode.t -> t
 
-val create_closure_vars : Var_within_closure.Set.t -> t
+(* val create_value_slots : Value_slot.Set.t -> t *)
 
-(** [diff t1 t2] removes from [t1] all those names that occur in [t2].
+(** [diff t1 ~without:t2] removes from [t1] all those names that occur in [t2].
 
     The number of occurrences of any names in the return value will be exactly
     the same as in [t1].
 
     Note that a code ID in [t2] will not only be removed from the code ID set in
     [t1] but also the newer-version-of code ID set in [t1]. *)
-val diff : t -> t -> t
+val diff : t -> without:t -> t
 
 val union : t -> t -> t
 
 val union_list : t list -> t
 
 (** [subset_domain t1 t2] is the usual "set subset" test on the names occurring
-    in [t1] and [t2]. The numbers of occurrences and the kinds of those
+    in [t1] and [t2]. The numbers of occurrences and the name_modes of those
     occurrences are ignored. *)
 val subset_domain : t -> t -> bool
 
@@ -117,13 +126,13 @@ val continuations_with_traps : t -> Continuation.Set.t
 
 val continuations_including_in_trap_actions : t -> Continuation.Set.t
 
-val closure_ids : t -> Closure_id.Set.t
+val function_slots_in_normal_projections : t -> Function_slot.Set.t
 
-val normal_closure_ids : t -> Closure_id.Set.t
+val all_function_slots : t -> Function_slot.Set.t
 
-val closure_vars : t -> Var_within_closure.Set.t
+val value_slots_in_normal_projections : t -> Value_slot.Set.t
 
-val normal_closure_vars : t -> Var_within_closure.Set.t
+val all_value_slots : t -> Value_slot.Set.t
 
 val symbols : t -> Symbol.Set.t
 
@@ -131,15 +140,11 @@ val code_ids : t -> Code_id.Set.t
 
 val newer_version_of_code_ids : t -> Code_id.Set.t
 
-val only_newer_version_of_code_ids : t -> Code_id.Set.t
-
-val restrict_to_closure_vars : t -> t
+val restrict_to_value_slots_and_function_slots : t -> t
 
 val code_ids_and_newer_version_of_code_ids : t -> Code_id.Set.t
 
 val without_code_ids : t -> t
-
-val without_closure_vars : t -> t
 
 val with_only_variables : t -> t
 
@@ -164,26 +169,17 @@ val mem_name : t -> Name.t -> bool
 
 val mem_code_id : t -> Code_id.t -> bool
 
-val mem_newer_version_of_code_id : t -> Code_id.t -> bool
+val value_slot_is_used_or_imported : t -> Value_slot.t -> bool
 
-val mem_closure_var : t -> Var_within_closure.t -> bool
+val remove_var : t -> var:Variable.t -> t
 
-val closure_var_is_used_or_imported : t -> Var_within_closure.t -> bool
+val remove_code_id_or_symbol : t -> code_id_or_symbol:Code_id_or_symbol.t -> t
 
-val remove_var : t -> Variable.t -> t
-
-val remove_code_id_or_symbol : t -> Code_id_or_symbol.t -> t
-
-val remove_continuation : t -> Continuation.t -> t
-
-val remove_one_occurrence_of_closure_var :
-  t -> Var_within_closure.t -> Name_mode.t -> t
+val remove_continuation : t -> continuation:Continuation.t -> t
 
 val greatest_name_mode_var : t -> Variable.t -> Name_mode.Or_absent.t
 
-val downgrade_occurrences_at_strictly_greater_kind : t -> Name_mode.t -> t
-
-val filter_names : t -> f:(Name.t -> bool) -> t
+val downgrade_occurrences_at_strictly_greater_name_mode : t -> Name_mode.t -> t
 
 val fold_names : t -> init:'a -> f:('a -> Name.t -> 'a) -> 'a
 
@@ -193,3 +189,5 @@ val fold_continuations_including_in_trap_actions :
   t -> init:'a -> f:('a -> Continuation.t -> 'a) -> 'a
 
 val fold_code_ids : t -> init:'a -> f:('a -> Code_id.t -> 'a) -> 'a
+
+val increase_counts : t -> t

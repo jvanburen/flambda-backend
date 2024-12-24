@@ -14,67 +14,45 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
-(** Kinds of Flambda types. *)
-
-(** Empty and known-distinct types. *)
-type empty_naked_immediate = private Naked_immediate
-
-type empty_naked_float = private Naked_float
-
-type empty_naked_int32 = private Naked_int32
-
-type empty_naked_int64 = private Naked_int64
-
-type empty_naked_nativeint = private Naked_nativeint
-
-(** GADT indexes. *)
-type value = private Value
-
-type naked_immediate = empty_naked_immediate * Targetint_31_63.Set.t
-
-type naked_float = empty_naked_float * Numeric_types.Float_by_bit_pattern.Set.t
-
-type naked_int32 = empty_naked_int32 * Numeric_types.Int32.Set.t
-
-type naked_int64 = empty_naked_int64 * Numeric_types.Int64.Set.t
-
-type naked_nativeint = empty_naked_nativeint * Targetint_32_64.Set.t
-
-type fabricated = private Fabricated
-
-type rec_info = private Rec_info
+(** Kinds and subkinds of Flambda types. *)
 
 module Naked_number_kind : sig
   type t =
     | Naked_immediate
+    | Naked_float32
     | Naked_float
     | Naked_int32
     | Naked_int64
     | Naked_nativeint
+    | Naked_vec128
 
   val print : Format.formatter -> t -> unit
+
+  val equal : t -> t -> bool
 end
 
 (** The kinds themselves. *)
 type t = private
-  | Value  (** OCaml values that may exist at source level. *)
+  | Value  (** OCaml values, either immediates or pointers. *)
   | Naked_number of Naked_number_kind.t
       (** The kind of unboxed numbers and untagged immediates. *)
-  | Fabricated
+  | Region
       (** Values which have been introduced by Flambda and are never accessible
           at the source language level (for example sets of closures). *)
   | Rec_info
-      (** Recursion depths of identifiers. Like [Fabricated], not accessible at
-          the source level, but also not accessible at run time. *)
+      (** Recursion depths of identifiers. Like [Region], not accessible at the
+          source level, but also not accessible at run time. *)
 
 type kind = t
 
 (** Constructors for the various kinds. *)
 val value : t
 
+val naked_number : Naked_number_kind.t -> t
+
 val naked_immediate : t
+
+val naked_float32 : t
 
 val naked_float : t
 
@@ -84,9 +62,9 @@ val naked_int64 : t
 
 val naked_nativeint : t
 
-(* CR mshinwell: Fabricated kinds are only used in Flambda_static now. Make a
-   separate type. *)
-val fabricated : t
+val naked_vec128 : t
+
+val region : t
 
 val rec_info : t
 
@@ -94,18 +72,74 @@ val is_value : t -> bool
 
 val is_naked_float : t -> bool
 
-(** The kind of the unit value. *)
-val unit : t
+val to_lambda : t -> Lambda.layout
 
 include Container_types.S with type t := t
 
+type flat_suffix_element = private
+  | Tagged_immediate
+  | Naked_float
+  | Naked_float32
+  | Naked_int32
+  | Naked_int64
+  | Naked_nativeint
+  | Naked_vec128
+
+module Mixed_block_shape : sig
+  type t
+
+  val from_lambda : Lambda.mixed_block_shape -> t
+
+  val field_kinds : t -> kind array
+
+  val value_prefix_size : t -> int
+
+  val flat_suffix : t -> flat_suffix_element array
+
+  val size_in_words : t -> int
+
+  val offset_in_words : t -> int -> int
+
+  val equal : t -> t -> bool
+
+  val compare : t -> t -> int
+end
+
+module Scannable_block_shape : sig
+  type t =
+    | Value_only
+    | Mixed_record of Mixed_block_shape.t
+
+  (** For now if two block shapes do not compare as equal they will be
+      incompatible. If that changes, a [compatible] function will be
+      introduced. *)
+  val equal : t -> t -> bool
+
+  val compare : t -> t -> int
+
+  val print : Format.formatter -> t -> unit
+
+  val element_kind : t -> int -> kind
+end
+
+module Block_shape : sig
+  type t =
+    | Scannable of Scannable_block_shape.t
+    | Float_record
+
+  val equal : t -> t -> bool
+
+  val compare : t -> t -> int
+
+  val print : Format.formatter -> t -> unit
+
+  val element_kind : t -> int -> kind
+end
+
 module Standard_int : sig
-  (** These kinds are known as the "standard integer kinds". They correspond to
-      the usual representations of tagged immediates, 32-bit, 64-bit and native
-      integers as expected by the operations in [Flambda_primitive]. (Boxing of
-      the latter three kinds of integers is handled via explicit boxing and
-      unboxing primitives; as such, the boxed versions are not known as
-      "standard". *)
+  (** "Standard" because these correspond to the usual representations of tagged
+      immediates, 32-bit, 64-bit and native integers as expected by the
+      operations in [Flambda_primitive]. *)
   type t =
     | Tagged_immediate
     | Naked_immediate
@@ -125,10 +159,13 @@ module Standard_int_or_float : sig
   type t =
     | Tagged_immediate
     | Naked_immediate
+    | Naked_float32
     | Naked_float
     | Naked_int32
     | Naked_int64
     | Naked_nativeint
+
+  val of_standard_int : Standard_int.t -> t
 
   val to_kind : t -> kind
 
@@ -137,23 +174,21 @@ module Standard_int_or_float : sig
   include Container_types.S with type t := t
 end
 
-(* CR mshinwell: If the tagging/untagging experiment works, this and various
-   other things need renaming, to accommodate untagging. *)
 module Boxable_number : sig
   (** These kinds are those of the numbers for which a tailored boxed
       representation exists. *)
 
   type t =
+    | Naked_float32
     | Naked_float
     | Naked_int32
     | Naked_int64
     | Naked_nativeint
-    | Untagged_immediate
+    | Naked_vec128
 
-  (** The kind of the _unboxed_ representation of the given [t]. *)
-  val to_kind : t -> kind
+  val unboxed_kind : t -> kind
 
-  val of_naked_number_kind : Naked_number_kind.t -> t
+  val primitive_kind : t -> Primitive.boxed_integer
 
   val print_lowercase : Format.formatter -> t -> unit
 
@@ -162,56 +197,69 @@ module Boxable_number : sig
   include Container_types.S with type t := t
 end
 
-(** Witnesses for the naked number kinds, for use when matching on the structure
-    of types, to introduce constraints. *)
-module Naked_number : sig
-  type _ t =
-    | Naked_immediate : naked_immediate t
-    | Naked_float : naked_float t
-    | Naked_int32 : naked_int32 t
-    | Naked_int64 : naked_int64 t
-    | Naked_nativeint : naked_nativeint t
-
-  val print : Format.formatter -> _ t -> unit
-end
-
 module With_subkind : sig
-  module Subkind : sig
+  type full_kind
+
+  module Nullable : sig
+    type t =
+      | Nullable
+      | Non_nullable
+  end
+
+  (* Note: the current representation stores a non_null_value_subkind for every
+     kind, even though it is only relevant for [Value] kinds. Other kinds should
+     use the [Anything] constructor. *)
+  module Non_null_value_subkind : sig
     type t =
       | Anything
+      | Boxed_float32
       | Boxed_float
       | Boxed_int32
       | Boxed_int64
       | Boxed_nativeint
+      | Boxed_vec128
       | Tagged_immediate
-      | Block of
-          { tag : Tag.t;
-            fields : t list
+      | Variant of
+          { consts : Targetint_31_63.Set.t;
+            non_consts : (Block_shape.t * full_kind list) Tag.Scannable.Map.t
           }
       | Float_block of { num_fields : int }
       | Float_array
       | Immediate_array
       | Value_array
       | Generic_array
+      | Unboxed_float32_array
+      | Unboxed_int32_array
+      | Unboxed_int64_array
+      | Unboxed_nativeint_array
+      | Unboxed_vec128_array
+      | Unboxed_product_array
 
     include Container_types.S with type t := t
   end
 
-  type kind = t
+  type t = full_kind
 
-  type t
+  val create : kind -> Non_null_value_subkind.t -> Nullable.t -> t
 
-  val create : kind -> Subkind.t -> t
+  val anything : kind -> t
 
   val kind : t -> kind
 
-  val subkind : t -> Subkind.t
+  val non_null_value_subkind : t -> Non_null_value_subkind.t
+
+  val nullable : t -> Nullable.t
 
   val has_useful_subkind_info : t -> bool
 
+  (* Note: all constructors below assume non-nullability, except when noted *)
+
+  (* [any_value] is nullable *)
   val any_value : t
 
   val naked_immediate : t
+
+  val naked_float32 : t
 
   val naked_float : t
 
@@ -221,6 +269,10 @@ module With_subkind : sig
 
   val naked_nativeint : t
 
+  val naked_vec128 : t
+
+  val region : t
+
   val boxed_float : t
 
   val boxed_int32 : t
@@ -228,6 +280,8 @@ module With_subkind : sig
   val boxed_int64 : t
 
   val boxed_nativeint : t
+
+  val boxed_vec128 : t
 
   val tagged_immediate : t
 
@@ -241,34 +295,51 @@ module With_subkind : sig
 
   val generic_array : t
 
+  val unboxed_vec128_array : t
+
+  val unboxed_product_array : t
+
   val block : Tag.t -> t list -> t
 
   val float_block : num_fields:int -> t
 
   val of_naked_number_kind : Naked_number_kind.t -> t
 
-  type descr = private
-    | Any_value
-    | Naked_number of Naked_number_kind.t
-    | Boxed_float
-    | Boxed_int32
-    | Boxed_int64
-    | Boxed_nativeint
-    | Tagged_immediate
-    | Rec_info
-    | Block of
-        { tag : Tag.t;
-          fields : descr list
-        }
-    | Float_block of { num_fields : int }
-    | Float_array
-    | Immediate_array
-    | Value_array
-    | Generic_array
+  val naked_of_boxable_number : Boxable_number.t -> t
 
-  val descr : t -> descr
+  val boxed_of_boxable_number : Boxable_number.t -> t
+
+  (* Nullability is taken from the Lambda value kind *)
+  val from_lambda_value_kind : Lambda.value_kind -> t
+
+  (* Nullability is taken from the Lambda value kind *)
+  val from_lambda_values_and_unboxed_numbers_only : Lambda.layout -> t
 
   val compatible : t -> when_used_at:t -> bool
 
+  val erase_subkind : t -> t
+
   include Container_types.S with type t := t
+
+  val equal_ignoring_subkind : t -> t -> bool
+
+  val must_be_gc_scannable : t -> bool
+
+  val may_be_gc_scannable : t -> bool
+end
+
+module Flat_suffix_element : sig
+  type t = flat_suffix_element
+
+  val naked_float : t
+
+  val kind : t -> kind
+
+  val from_lambda : Lambda.flat_element -> t
+
+  val print : Format.formatter -> t -> unit
+
+  val compare : t -> t -> int
+
+  val to_kind_with_subkind : t -> With_subkind.t
 end

@@ -14,19 +14,11 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 type t =
   | Linearly_used_and_inlinable of
-      { params : Bound_parameter.t list;
+      { params : Bound_parameters.t;
             (** To avoid re-opening name abstractions, we store the opened
-                parameters and handler here. Note that the properties of
-                [Name_abstraction] mean that this is safe even if the expression
-                were to be substituted in multiple places, with corresponding
-                bindings of the [params]. There is no requirement for binders to
-                use fresh names when name abstractions are being constructed;
-                they just have to match the ones in the terms being closed
-                over. *)
+                parameters and handler here. *)
         handler : Rebuilt_expr.t;
             (** [free_names_of_handler] includes entries for any occurrences of
                 the [params] in the [handler]. *)
@@ -38,11 +30,13 @@ type t =
             (** The handler, if available, is stored for
                 [Simplify_switch_expr]. *)
       }
-  | Non_inlinable_non_zero_arity of { arity : Flambda_arity.With_subkinds.t }
+  | Non_inlinable_non_zero_arity of { arity : [`Unarized] Flambda_arity.t }
   | Toplevel_or_function_return_or_exn_continuation of
-      { arity : Flambda_arity.With_subkinds.t }
-  | Unreachable of { arity : Flambda_arity.With_subkinds.t }
+      { arity : [`Unarized] Flambda_arity.t }
+  | Invalid of { arity : [`Unarized] Flambda_arity.t }
+      (** [Invalid] means that the code of the continuation handler is invalid,
+          not that the continuation has zero uses. *)
 
-val print : Downwards_env.are_rebuilding_terms -> Format.formatter -> t -> unit
+val print : Are_rebuilding_terms.t -> Format.formatter -> t -> unit
 
-val arity : t -> Flambda_arity.With_subkinds.t
+val arity : t -> [`Unarized] Flambda_arity.t

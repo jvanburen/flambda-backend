@@ -12,26 +12,26 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 module Projection : sig
   type t = private
-    | Block_load of { index : Targetint_31_63.Imm.t }
-    | Project_var of
-        { project_from : Closure_id.t;
-          var : Var_within_closure.t
+    | Block_load of { index : Targetint_31_63.t }
+    | Project_value_slot of
+        { project_from : Function_slot.t;
+          value_slot : Value_slot.t
         }
 
-  val block_load : index:Targetint_31_63.Imm.t -> t
+  val block_load : index:Targetint_31_63.t -> t
 
-  val project_var : Closure_id.t -> Var_within_closure.t -> t
+  val project_value_slot : Function_slot.t -> Value_slot.t -> t
 end
 
 type t
 
 val print : Format.formatter -> t -> unit
 
-val create : Symbol.t -> Projection.t -> t
+val create : Symbol.t -> Projection.t -> Flambda_kind.With_subkind.t -> t
+
+val kind : t -> Flambda_kind.With_subkind.t
 
 val symbol : t -> Symbol.t
 

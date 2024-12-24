@@ -12,344 +12,469 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
-[@@@ocaml.warning "-27"] (* FIXME remove this once closures changes done *)
-
-[@@@ocaml.warning "-32"] (* FIXME remove this once closures changes done *)
-
 open! Flambda.Import
 
 module C = struct
   include Cmm_helpers
-  include To_cmm_helper
+  include To_cmm_shared
 end
 
-module Env = To_cmm_env
 module SC = Static_const
 module R = To_cmm_result
+module UK = C.Update_kind
+module MBS = Flambda_kind.Mixed_block_shape
 
-(* CR mshinwell: Share these next functions with To_cmm. Unfortunately there's a
-   name clash with at least one of them ("symbol") with functions already in
-   To_cmm_helper. *)
-let symbol s = Linkage_name.to_string (Symbol.linkage_name s)
-
-let tag_targetint t = Targetint_32_64.(add (shift_left t 1) one)
-
-let targetint_of_imm i =
-  Targetint_31_63.Imm.to_targetint i.Targetint_31_63.value
-
-let nativeint_of_targetint t =
-  match Targetint_32_64.repr t with
-  | Int32 i -> Nativeint.of_int32 i
-  | Int64 i -> Int64.to_nativeint i
-
-let todo () = failwith "Not yet implemented"
-(* ----- End of functions to share ----- *)
-
-let name_static env name =
-  Name.pattern_match name
-    ~var:(fun v -> env, `Var v)
-    ~symbol:(fun s ->
-      ( Env.check_scope ~allow_deleted:false env
-          (Code_id_or_symbol.create_symbol s),
-        `Data [C.symbol_address (symbol s)] ))
-
-let const_static _env cst =
-  match Reg_width_const.descr cst with
-  | Naked_immediate i -> [C.cint (nativeint_of_targetint (targetint_of_imm i))]
-  | Tagged_immediate i ->
-    [C.cint (nativeint_of_targetint (tag_targetint (targetint_of_imm i)))]
-  | Naked_float f -> [C.cfloat (Numeric_types.Float_by_bit_pattern.to_float f)]
-  | Naked_int32 i -> [C.cint (Nativeint.of_int32 i)]
-  | Naked_int64 i ->
-    if C.arch32
-    then todo () (* split int64 on 32-bit archs *)
-    else [C.cint (Int64.to_nativeint i)]
-  | Naked_nativeint t -> [C.cint (nativeint_of_targetint t)]
-
-let simple_static env s =
-  Simple.pattern_match s
-    ~name:(fun n ~coercion:_ -> name_static env n)
-    ~const:(fun c -> env, `Data (const_static env c))
-
-let static_value env v =
-  match (v : Field_of_static_block.t) with
-  | Symbol s ->
-    ( Env.check_scope ~allow_deleted:false env
-        (Code_id_or_symbol.create_symbol s),
-      C.symbol_address (symbol s) )
-  | Dynamically_computed _ -> env, C.cint 1n
-  | Tagged_immediate i ->
-    env, C.cint (nativeint_of_targetint (tag_targetint (targetint_of_imm i)))
+let static_field res field field_kind =
+  Simple.pattern_match'
+    (Simple.With_debuginfo.simple field)
+    ~var:(fun _var ~coercion:_ ->
+      match (field_kind : Flambda_kind.t) with
+      | Naked_number Naked_vec128 -> [C.cvec128 { low = 1L; high = 1L }]
+      | Naked_number
+          ( Naked_immediate | Naked_float32 | Naked_float | Naked_int32
+          | Naked_int64 | Naked_nativeint )
+      | Value ->
+        [C.cint 1n]
+      | Region | Rec_info ->
+        Misc.fatal_errorf "Unexpected static field kind %a" Flambda_kind.print
+          field_kind)
+    ~symbol:(fun sym ~coercion:_ -> [C.symbol_address (R.symbol res sym)])
+    ~const:C.const_static
 
 let or_variable f default v cont =
   match (v : _ Or_variable.t) with
   | Const c -> f c cont
   | Var _ -> f default cont
 
-let make_update env kind symb var i prev_update =
-  let e, env, _ece = Env.inline_variable env var in
-  let address = C.field_address symb i Debuginfo.none in
-  let update = C.store kind Lambda.Root_initialization address e in
-  match prev_update with
-  | None -> env, Some update
-  | Some prev_update -> env, Some (C.sequence prev_update update)
+let update_field symb env res acc i update_kind field =
+  Simple.pattern_match'
+    (Simple.With_debuginfo.simple field)
+    ~var:(fun var ~coercion:_ ->
+      (* CR mshinwell/mslater: It would be nice to know if [var] is an
+         immediate. *)
+      let dbg = Simple.With_debuginfo.dbg field in
+      C.make_update env res dbg update_kind ~symbol:(C.symbol ~dbg symb) var
+        ~index:i ~prev_updates:acc)
+    ~symbol:(fun _sym ~coercion:_ -> env, res, acc)
+    ~const:(fun _cst -> env, res, acc)
 
-let rec static_block_updates symb env acc i = function
-  | [] -> env, acc
-  | sv :: r -> begin
-    match (sv : Field_of_static_block.t) with
-    | Symbol _ | Tagged_immediate _ ->
-      static_block_updates symb env acc (i + 1) r
-    | Dynamically_computed var ->
-      let env, acc = make_update env Cmm.Word_val symb var i acc in
-      static_block_updates symb env acc (i + 1) r
-  end
+let rec static_block_updates symb env res acc i = function
+  | [] -> env, res, acc
+  | (simple, update_kind) :: r ->
+    let env, res, acc = update_field symb env res acc i update_kind simple in
+    static_block_updates symb env res acc
+      (i + UK.field_size_in_words update_kind)
+      r
 
-let rec static_float_array_updates symb env acc i = function
-  | [] -> env, acc
-  | sv :: r -> begin
+type maybe_int32 =
+  | Int32
+  | Int64_or_nativeint
+
+(* The index [i] is always in the units of the size of the integer concerned,
+   not units of 64-bit words. *)
+let rec static_unboxed_array_updates symb env res acc update_kind i = function
+  | [] -> env, res, acc
+  | sv :: r -> (
     match (sv : _ Or_variable.t) with
-    | Const _ -> static_float_array_updates symb env acc (i + 1) r
-    | Var var ->
-      let env, acc = make_update env Cmm.Double symb var i acc in
-      static_float_array_updates symb env acc (i + 1) r
-  end
+    | Const _ ->
+      static_unboxed_array_updates symb env res acc update_kind (i + 1) r
+    | Var (var, dbg) ->
+      let env, res, acc =
+        C.make_update env res dbg update_kind ~symbol:(C.symbol ~dbg symb) var
+          ~index:i ~prev_updates:acc
+      in
+      static_unboxed_array_updates symb env res acc update_kind (i + 1) r)
 
-let static_boxed_number kind env s default emit transl v r updates =
-  let name = symbol s in
-  let aux x cont = emit (name, Cmmgen_state.Global) (transl x) cont in
-  let updates =
+let static_boxed_number ~kind ~env ~symbol ~default ~emit ~transl ~structured v
+    res updates =
+  let symbol = R.symbol res symbol in
+  let aux x cont = emit symbol (transl x) cont in
+  let env, res, updates =
     match (v : _ Or_variable.t) with
-    | Const _ -> env, None
-    | Var v -> make_update env kind (C.symbol name) v 0 updates
+    | Const c ->
+      (* Add the const to the cmmgen_state structured constants table so that
+         functions in cmm_helpers can short-circuit Unboxing of boxed constant
+         symbols, particularly in Classic mode. *)
+      let structured_constant = structured (transl c) in
+      Cmmgen_state.add_structured_constant symbol structured_constant;
+      env, res, updates
+    | Var (v, dbg) ->
+      C.make_update env res dbg kind ~symbol:(C.symbol ~dbg symbol) v ~index:0
+        ~prev_updates:updates
   in
-  R.update_data r (or_variable aux default v), updates
+  R.update_data res (or_variable aux default v), env, updates
 
-let get_whole_closure_symbol =
-  let whole_closure_symb_count = ref 0 in
-  fun r ->
-    match !r with
-    | Some s -> s
-    | None ->
-      incr whole_closure_symb_count;
-      let comp_unit = Compilation_unit.get_current_exn () in
-      let linkage_name =
-        Linkage_name.create
-        @@ Printf.sprintf ".clos_%d" !whole_closure_symb_count
-      in
-      let s = Symbol.create comp_unit linkage_name in
-      r := Some s;
-      s
-
-let rec static_set_of_closures env symbs set prev_update =
-  let clos_symb = ref None in
-  let fun_decls = Set_of_closures.function_decls set in
-  let decls = Function_declarations.funs fun_decls in
-  let elts =
-    Closure_offsets.filter_closure_vars set
-      ~used_closure_vars:(Env.used_closure_vars env)
+let add_function env res ~params_and_body code_id p ~result_arity ~fun_dbg
+    ~zero_alloc_attribute =
+  let fundecl, res =
+    params_and_body env res code_id p ~result_arity ~fun_dbg
+      ~zero_alloc_attribute
   in
-  let layout =
-    Env.layout env
-      (List.map fst (Closure_id.Map.bindings decls))
-      (List.map fst (Var_within_closure.Map.bindings elts))
-  in
-  let env, l, updates, length =
-    fill_static_layout clos_symb symbs decls layout.startenv elts env []
-      prev_update 0 layout.slots
-  in
-  let block =
-    match l with
-    (* Closures can be deleted by flambda but still appear in let_symbols, hence
-       we may end up with empty sets of closures. *)
-    | [] -> []
-    (* Regular case. *)
-    | _ ->
-      let header = C.cint (C.black_closure_header length) in
-      let sdef =
-        match !clos_symb with
-        | None -> []
-        | Some s -> C.define_symbol ~global:false (symbol s)
-      in
-      (header :: sdef) @ l
-  in
-  env, block, updates
+  R.add_function res fundecl
 
-and fill_static_layout s symbs decls startenv elts env acc updates i = function
-  | [] -> env, List.rev acc, updates, i
-  | (j, slot) :: r ->
-    let acc = fill_static_up_to j acc i in
-    let env, acc, offset, updates =
-      fill_static_slot s symbs decls startenv elts env acc j updates slot
-    in
-    fill_static_layout s symbs decls startenv elts env acc updates offset r
-
-and fill_static_slot s symbs decls startenv elts env acc offset updates slot =
-  match (slot : Closure_offsets.layout_slot) with
-  | Infix_header ->
-    let field = C.cint (C.infix_header (offset + 1)) in
-    env, field :: acc, offset + 1, updates
-  | Env_var v ->
-    let env, contents =
-      simple_static env (Var_within_closure.Map.find v elts)
-    in
-    let env, fields, updates =
-      match contents with
-      | `Data fields -> env, fields, updates
-      | `Var v ->
-        let s = get_whole_closure_symbol s in
-        let env, updates =
-          make_update env Cmm.Word_val (C.symbol (symbol s)) v offset updates
-        in
-        env, [C.cint 1n], updates
-    in
-    env, List.rev fields @ acc, offset + 1, updates
-  | Closure c ->
-    let code_id = Closure_id.Map.find c decls in
-    let symb = Closure_id.Map.find c symbs in
-    let external_name = symbol symb in
-    let code_symbol = Code_id.code_symbol code_id in
-    let code_name = Linkage_name.to_string (Symbol.linkage_name code_symbol) in
-    let acc = List.rev (C.define_symbol ~global:true external_name) @ acc in
-    let arity = Env.get_func_decl_params_arity env code_id in
-    let closure_info = C.closure_info ~arity ~startenv:(startenv - offset) in
-    (* We build here the **reverse** list of fields for the closure *)
-    if arity = 1 || arity = 0
-    then
-      let acc = C.cint closure_info :: C.symbol_address code_name :: acc in
-      env, acc, offset + 2, updates
-    else
-      let acc =
-        C.symbol_address code_name :: C.cint closure_info
-        :: C.symbol_address (C.curry_function_sym arity)
-        :: acc
-      in
-      env, acc, offset + 3, updates
-
-and fill_static_up_to j acc i =
-  if i = j then acc else fill_static_up_to j (C.cint 1n :: acc) (i + 1)
-
-let update_env_for_code env (code : Code.t) =
-  (* Check scope of the newer-version-of code ID *)
-  match Code.newer_version_of code with
-  | None -> env
-  | Some code_id ->
-    Env.check_scope ~allow_deleted:true env
-      (Code_id_or_symbol.create_code_id code_id)
-
-let add_function env r ~params_and_body code_id p ~fun_dbg =
-  let fun_symbol = Code_id.code_symbol code_id in
-  let fun_name = Linkage_name.to_string (Symbol.linkage_name fun_symbol) in
-  let fundecl, r = params_and_body env r fun_name p ~fun_dbg in
-  R.add_function r fundecl
-
-let add_functions env ~params_and_body r (code : Code.t) =
-  add_function env r ~params_and_body (Code.code_id code)
+let add_functions env ~params_and_body res (code : Code.t) =
+  add_function env res ~params_and_body (Code.code_id code)
     (Code.params_and_body code)
-    ~fun_dbg:(Code.dbg code)
+    ~result_arity:(Code.result_arity code) ~fun_dbg:(Code.dbg code)
+    ~zero_alloc_attribute:(Code.zero_alloc_attribute code)
 
-let preallocate_set_of_closures (r, updates, env) ~closure_symbols
+let preallocate_set_of_closures (res, updates, env) ~closure_symbols
     set_of_closures =
-  let env, data, updates =
+  let env, res, data, updates =
     let closure_symbols =
-      closure_symbols |> Closure_id.Lmap.bindings |> Closure_id.Map.of_list
+      closure_symbols |> Function_slot.Lmap.bindings
+      |> Function_slot.Map.of_list
     in
-    static_set_of_closures env closure_symbols set_of_closures updates
+    To_cmm_set_of_closures.let_static_set_of_closures env res closure_symbols
+      set_of_closures ~prev_updates:updates
   in
-  let r = R.set_data r data in
-  r, updates, env
+  let res = R.set_data res data in
+  res, updates, env
 
-let static_const0 env r ~updates ~params_and_body
-    (bound_symbols : Bound_symbols.Pattern.t) (static_const : Static_const.t) =
-  match bound_symbols, static_const with
-  | Block_like s, Block (tag, _mut, fields) ->
-    let r = R.check_for_module_symbol r s in
-    let name = symbol s in
-    let tag = Tag.Scannable.to_int tag in
-    let block_name = name, Cmmgen_state.Global in
-    let header = C.black_block_header tag (List.length fields) in
-    let env, static_fields =
-      List.fold_right
-        (fun v (env, static_fields) ->
-          let env, static_field = static_value env v in
-          env, static_field :: static_fields)
-        fields (env, [])
+let immutable_unboxed_int_array_payload maybe_int32 num_fields ~elts ~to_int64 =
+  let int64_of_elts =
+    List.map (Or_variable.value_map ~default:0L ~f:to_int64) elts
+  in
+  let packed_int64s =
+    match maybe_int32 with
+    | Int32 ->
+      let rec aux acc = function
+        | [] -> List.rev acc
+        | a :: [] -> List.rev (a :: acc)
+        | a :: b :: r ->
+          let i = Int64.(add (logand a 0xffffffffL) (shift_left b 32)) in
+          aux (i :: acc) r
+      in
+      aux [] int64_of_elts
+    | Int64_or_nativeint -> int64_of_elts
+  in
+  assert (List.length packed_int64s = num_fields);
+  List.map (fun i -> Cmm.Cint (Int64.to_nativeint i)) packed_int64s
+
+let immutable_unboxed_int_array env res updates maybe_int32 ~symbol ~elts
+    ~to_int64 ~custom_ops_symbol =
+  let sym = R.symbol res symbol in
+  let num_elts = List.length elts in
+  let num_fields, update_kind =
+    match maybe_int32 with
+    | Int32 -> (1 + num_elts) / 2, UK.naked_int32s
+    | Int64_or_nativeint -> num_elts, UK.naked_int64s
+  in
+  let header =
+    C.black_custom_header
+      ~size:(1 (* for the custom_operations pointer *) + num_fields)
+  in
+  let static_fields =
+    let sym_base, sym_off = custom_ops_symbol ~num_elts in
+    let address =
+      match sym_off with
+      | None -> C.symbol_address (Cmm.global_symbol sym_base)
+      | Some sym_off -> C.symbol_offset (Cmm.global_symbol sym_base) sym_off
     in
-    let block = C.emit_block block_name header static_fields in
-    let env, updates =
-      static_block_updates (C.symbol name) env updates 0 fields
+    address
+    :: immutable_unboxed_int_array_payload maybe_int32 num_fields ~elts
+         ~to_int64
+  in
+  let block = C.emit_block sym header static_fields in
+  let env, res, updates =
+    static_unboxed_array_updates sym env res updates update_kind 0 elts
+  in
+  env, R.set_data res block, updates
+
+let immutable_unboxed_float32_array env res updates ~symbol ~elts =
+  let sym = R.symbol res symbol in
+  let num_elts = List.length elts in
+  let num_fields = (1 + num_elts) / 2 in
+  let header =
+    C.black_custom_header
+      ~size:(1 (* for the custom_operations pointer *) + num_fields)
+  in
+  let payload =
+    (* If the array has odd length, the last 32 bits are implicitly initialized
+       to zero because the array is a static block. *)
+    List.map
+      (Or_variable.value_map ~default:(Cmm.Csingle 0.0) ~f:(fun f ->
+           (* All float32s are valid float64s, so round tripping through float
+              in Csingle will result in the same value (up to NaN bit
+              patterns). *)
+           Cmm.Csingle (Numeric_types.Float32_by_bit_pattern.to_float f)))
+      elts
+  in
+  let static_fields =
+    let sym_base = "caml_unboxed_float32_array_ops" in
+    let address =
+      match num_elts mod 2 = 0 with
+      | true -> C.symbol_address (Cmm.global_symbol sym_base)
+      | false ->
+        C.symbol_offset
+          (Cmm.global_symbol sym_base)
+          Config.custom_ops_struct_size
     in
-    env, R.set_data r block, updates
+    address :: payload
+  in
+  let block = C.emit_block sym header static_fields in
+  let env, res, updates =
+    static_unboxed_array_updates sym env res updates UK.naked_float32s 0 elts
+  in
+  env, R.set_data res block, updates
+
+let immutable_unboxed_vec128_array env res updates ~symbol ~elts =
+  let sym = R.symbol res symbol in
+  let num_elts = List.length elts in
+  let num_fields = num_elts * 2 in
+  let header =
+    C.black_custom_header
+      ~size:(1 (* for the custom_operations pointer *) + num_fields)
+  in
+  let payload =
+    List.map
+      (Or_variable.value_map
+         ~default:(Cmm.Cvec128 { high = 0L; low = 0L })
+         ~f:(fun v ->
+           let Vector_types.Vec128.Bit_pattern.{ high; low } =
+             Vector_types.Vec128.Bit_pattern.to_bits v
+           in
+           Cmm.Cvec128 { high; low }))
+      elts
+  in
+  let static_fields =
+    C.symbol_address (Cmm.global_symbol "caml_unboxed_vec128_array_ops")
+    :: payload
+  in
+  let block = C.emit_block sym header static_fields in
+  let env, res, updates =
+    static_unboxed_array_updates sym env res updates UK.naked_vec128s 0 elts
+  in
+  env, R.set_data res block, updates
+
+let static_const0 env res ~updates (bound_static : Bound_static.Pattern.t)
+    (static_const : Static_const.t) =
+  match bound_static, static_const with
+  | Block_like s, Block (tag, mut, shape, fields) ->
+    (match mut with
+    | Immutable | Immutable_unique -> ()
+    | Mutable ->
+      (* CR mshinwell: actually we could probably permit updates on the flat
+         suffix even now *)
+      Misc.fatal_errorf
+        "Symbol %a: the GC does not currently support mutable fields in \
+         statically-allocated values"
+        Symbol.print s);
+    let sym = R.symbol res s in
+    let res = R.check_for_module_symbol res s in
+    let field_kinds, header =
+      let tag = Tag.Scannable.to_int tag in
+      let num_fields = List.length fields in
+      match shape with
+      | Value_only ->
+        ( List.init num_fields (fun _ -> Flambda_kind.value),
+          C.black_block_header tag num_fields )
+      | Mixed_record shape ->
+        ( MBS.field_kinds shape |> Array.to_list,
+          C.black_mixed_block_header tag (MBS.size_in_words shape)
+            ~scannable_prefix_len:(MBS.value_prefix_size shape) )
+    in
+    let static_fields =
+      Misc.Stdlib.List.concat_map2 (static_field res) fields field_kinds
+    in
+    let block = C.emit_block sym header static_fields in
+    let update_kinds =
+      match shape with
+      | Value_only -> List.map (fun _ -> UK.pointers) fields
+      | Mixed_record shape ->
+        let value_prefix =
+          List.init (MBS.value_prefix_size shape) (fun _ -> UK.pointers)
+        in
+        let flat_suffix =
+          List.map
+            (fun (flat_suffix_elt : Flambda_kind.flat_suffix_element) ->
+              match flat_suffix_elt with
+              | Tagged_immediate -> UK.tagged_immediates
+              | Naked_float -> UK.naked_floats
+              | Naked_float32 -> UK.naked_float32_fields
+              | Naked_int32 -> UK.naked_int32_fields
+              | Naked_vec128 -> UK.naked_vec128_fields
+              | Naked_int64 | Naked_nativeint -> UK.naked_int64s)
+            (Flambda_kind.Mixed_block_shape.flat_suffix shape |> Array.to_list)
+        in
+        value_prefix @ flat_suffix
+    in
+    let env, res, updates =
+      static_block_updates sym env res updates 0
+        (List.combine fields update_kinds)
+    in
+    env, R.set_data res block, updates
   | Set_of_closures closure_symbols, Set_of_closures set_of_closures ->
-    let r, updates, env =
-      preallocate_set_of_closures (r, updates, env) ~closure_symbols
+    let res, updates, env =
+      preallocate_set_of_closures (res, updates, env) ~closure_symbols
         set_of_closures
     in
-    env, r, updates
-  | Block_like s, Boxed_float v ->
+    env, res, updates
+  | Block_like symbol, Boxed_float32 v ->
+    let default = Numeric_types.Float32_by_bit_pattern.zero in
+    let transl = Numeric_types.Float32_by_bit_pattern.to_float in
+    let structured f = Cmmgen_state.Const_float32 f in
+    let res, env, updates =
+      static_boxed_number ~kind:UK.naked_float32_fields ~env ~symbol ~default
+        ~emit:C.emit_float32_constant ~transl ~structured v res updates
+    in
+    env, res, updates
+  | Block_like symbol, Boxed_float v ->
     let default = Numeric_types.Float_by_bit_pattern.zero in
     let transl = Numeric_types.Float_by_bit_pattern.to_float in
-    let r, (env, updates) =
-      static_boxed_number Cmm.Double env s default C.emit_float_constant transl
-        v r updates
+    let structured f = Cmmgen_state.Const_float f in
+    let res, env, updates =
+      static_boxed_number ~kind:UK.naked_floats ~env ~symbol ~default
+        ~emit:C.emit_float_constant ~transl ~structured v res updates
     in
-    env, r, updates
-  | Block_like s, Boxed_int32 v ->
-    let r, (env, updates) =
-      static_boxed_number Cmm.Word_int env s 0l C.emit_int32_constant Fun.id v r
-        updates
+    env, res, updates
+  | Block_like symbol, Boxed_int32 v ->
+    let structured i = Cmmgen_state.Const_int32 i in
+    let res, env, updates =
+      static_boxed_number ~kind:UK.naked_int32_fields ~env ~symbol ~default:0l
+        ~emit:C.emit_int32_constant ~transl:Fun.id ~structured v res updates
     in
-    env, r, updates
-  | Block_like s, Boxed_int64 v ->
-    let r, (env, updates) =
-      static_boxed_number Cmm.Word_int env s 0L C.emit_int64_constant Fun.id v r
-        updates
+    env, res, updates
+  | Block_like symbol, Boxed_int64 v ->
+    let structured i = Cmmgen_state.Const_int64 i in
+    let res, env, updates =
+      static_boxed_number ~kind:UK.naked_int64s ~env ~symbol ~default:0L
+        ~emit:C.emit_int64_constant ~transl:Fun.id ~structured v res updates
     in
-    env, r, updates
-  | Block_like s, Boxed_nativeint v ->
+    env, res, updates
+  | Block_like symbol, Boxed_nativeint v ->
     let default = Targetint_32_64.zero in
-    let transl = nativeint_of_targetint in
-    let r, (env, updates) =
-      static_boxed_number Cmm.Word_int env s default C.emit_nativeint_constant
-        transl v r updates
+    let transl = C.nativeint_of_targetint in
+    let structured i = Cmmgen_state.Const_nativeint i in
+    let res, env, updates =
+      static_boxed_number ~kind:UK.naked_int64s ~env ~symbol ~default
+        ~emit:C.emit_nativeint_constant ~transl ~structured v res updates
     in
-    env, r, updates
+    env, res, updates
+  | Block_like symbol, Boxed_vec128 v ->
+    let default = Vector_types.Vec128.Bit_pattern.zero in
+    let transl v =
+      let { Vector_types.Vec128.Bit_pattern.high; low } =
+        Vector_types.Vec128.Bit_pattern.to_bits v
+      in
+      { Cmm.high; low }
+    in
+    let structured { Cmm.high; low } =
+      Cmmgen_state.Const_vec128 { high; low }
+    in
+    let res, env, updates =
+      (* Unaligned because boxed vec128 constants are not aligned during code
+         emission. Aligning them would complicate block layout. *)
+      static_boxed_number ~kind:UK.naked_vec128s ~env ~symbol ~default
+        ~emit:C.emit_vec128_constant ~transl ~structured v res updates
+    in
+    env, res, updates
   | Block_like s, (Immutable_float_block fields | Immutable_float_array fields)
     ->
-    let name = symbol s in
     let aux =
       Or_variable.value_map ~default:0.
         ~f:Numeric_types.Float_by_bit_pattern.to_float
     in
     let static_fields = List.map aux fields in
-    let float_array =
-      C.emit_float_array_constant (name, Cmmgen_state.Global) static_fields
+    let sym = R.symbol res s in
+    let float_array = C.emit_float_array_constant sym static_fields in
+    let env, res, e =
+      static_unboxed_array_updates sym env res updates UK.naked_floats 0 fields
     in
-    let env, e =
-      static_float_array_updates (C.symbol name) env updates 0 fields
+    env, R.update_data res float_array, e
+  | Block_like symbol, Immutable_float32_array elts ->
+    immutable_unboxed_float32_array env res updates ~symbol ~elts
+  | Block_like symbol, Immutable_int32_array elts ->
+    assert (Arch.size_int = 8);
+    immutable_unboxed_int_array env res updates Int32 ~symbol ~elts
+      ~to_int64:Int64.of_int32 ~custom_ops_symbol:(fun ~num_elts ->
+        ( "caml_unboxed_int32_array_ops",
+          Some (Config.custom_ops_struct_size * (num_elts mod 2)) ))
+  | Block_like symbol, Immutable_int64_array elts ->
+    immutable_unboxed_int_array env res updates Int64_or_nativeint ~symbol ~elts
+      ~to_int64:Fun.id ~custom_ops_symbol:(fun ~num_elts:_ ->
+        "caml_unboxed_int64_array_ops", None)
+  | Block_like symbol, Immutable_nativeint_array elts ->
+    immutable_unboxed_int_array env res updates Int64_or_nativeint ~symbol ~elts
+      ~to_int64:Targetint_32_64.to_int64 ~custom_ops_symbol:(fun ~num_elts:_ ->
+        "caml_unboxed_nativeint_array_ops", None)
+  | Block_like symbol, Immutable_vec128_array elts ->
+    immutable_unboxed_vec128_array env res updates ~symbol ~elts
+  | Block_like s, Immutable_value_array fields ->
+    let sym = R.symbol res s in
+    let header = C.black_block_header 0 (List.length fields) in
+    let field_kinds =
+      List.init (List.length fields) (fun _ -> Flambda_kind.value)
     in
-    env, R.update_data r float_array, e
-  | Block_like s, Empty_array ->
-    (* Recall: empty arrays have tag zero, even if their kind is naked float. *)
-    let block_name = symbol s, Cmmgen_state.Global in
+    let static_fields =
+      Misc.Stdlib.List.concat_map2 (static_field res) fields field_kinds
+    in
+    let block = C.emit_block sym header static_fields in
+    let update_kinds = List.map (fun _ -> UK.pointers) fields in
+    let env, res, updates =
+      static_block_updates sym env res updates 0
+        (List.combine fields update_kinds)
+    in
+    env, R.set_data res block, updates
+  | ( Block_like s,
+      Empty_array (Values_or_immediates_or_naked_floats | Unboxed_products) ) ->
+    (* Recall: empty arrays have tag zero, even if their kind is naked float.
+       Likewise arrays of unboxed products have tag zero. *)
+    let sym = R.symbol res s in
     let header = C.black_block_header 0 0 in
-    let block = C.emit_block block_name header [] in
-    env, R.set_data r block, updates
+    let block = C.emit_block sym header [] in
+    env, R.set_data res block, updates
+  | Block_like s, Empty_array Naked_float32s ->
+    let block =
+      C.emit_block (R.symbol res s)
+        (C.black_custom_header ~size:1)
+        [C.symbol_address (Cmm.global_symbol "caml_unboxed_float32_array_ops")]
+    in
+    env, R.set_data res block, updates
+  | Block_like s, Empty_array Naked_int32s ->
+    let block =
+      C.emit_block (R.symbol res s)
+        (C.black_custom_header ~size:1)
+        [C.symbol_address (Cmm.global_symbol "caml_unboxed_int32_array_ops")]
+    in
+    env, R.set_data res block, updates
+  | Block_like s, Empty_array Naked_int64s ->
+    let block =
+      C.emit_block (R.symbol res s)
+        (C.black_custom_header ~size:1)
+        [C.symbol_address (Cmm.global_symbol "caml_unboxed_int64_array_ops")]
+    in
+    env, R.set_data res block, updates
+  | Block_like s, Empty_array Naked_nativeints ->
+    let block =
+      C.emit_block (R.symbol res s)
+        (C.black_custom_header ~size:1)
+        [C.symbol_address (Cmm.global_symbol "caml_unboxed_nativeint_array_ops")]
+    in
+    env, R.set_data res block, updates
+  | Block_like s, Empty_array Naked_vec128s ->
+    let block =
+      C.emit_block (R.symbol res s)
+        (C.black_custom_header ~size:1)
+        [C.symbol_address (Cmm.global_symbol "caml_unboxed_vec128_array_ops")]
+    in
+    env, R.set_data res block, updates
   | Block_like s, Mutable_string { initial_value = str }
   | Block_like s, Immutable_string str ->
-    let name = symbol s in
-    let data = C.emit_string_constant (name, Cmmgen_state.Global) str in
-    env, R.update_data r data, updates
+    let data = C.emit_string_constant (R.symbol res s) str in
+    env, R.update_data res data, updates
   | Block_like _, Set_of_closures _ ->
     Misc.fatal_errorf
       "[Set_of_closures] values cannot be bound by [Block_like] bindings:@ %a"
       SC.print static_const
   | ( (Code _ | Set_of_closures _),
-      ( Block _ | Boxed_float _ | Boxed_int32 _ | Boxed_int64 _
-      | Boxed_nativeint _ | Immutable_float_block _ | Immutable_float_array _
-      | Empty_array | Mutable_string _ | Immutable_string _ ) ) ->
+      ( Block _ | Boxed_float _ | Boxed_float32 _ | Boxed_int32 _
+      | Boxed_int64 _ | Boxed_vec128 _ | Boxed_nativeint _
+      | Immutable_float_block _ | Immutable_float_array _
+      | Immutable_float32_array _ | Immutable_int32_array _
+      | Immutable_int64_array _ | Immutable_nativeint_array _
+      | Immutable_vec128_array _ | Immutable_value_array _ | Empty_array _
+      | Mutable_string _ | Immutable_string _ ) ) ->
     Misc.fatal_errorf
       "Block-like constants cannot be bound by [Code] or [Set_of_closures] \
        bindings:@ %a"
@@ -358,69 +483,59 @@ let static_const0 env r ~updates ~params_and_body
     Misc.fatal_errorf "Sets of closures cannot be bound by [Code] bindings:@ %a"
       SC.print static_const
 
-let static_const_or_code env r ~updates ~params_and_body
-    (bound_symbols : Bound_symbols.Pattern.t)
+let static_const_or_code env r ~updates (bound_static : Bound_static.Pattern.t)
     (static_const_or_code : Static_const_or_code.t) =
   let env, r, updates =
-    match bound_symbols, static_const_or_code with
+    match bound_static, static_const_or_code with
     | (Block_like _ | Set_of_closures _), Static_const static_const ->
-      static_const0 env r ~updates ~params_and_body bound_symbols static_const
+      static_const0 env r ~updates bound_static static_const
     | Code code_id, Code code ->
       if not (Code_id.equal code_id (Code.code_id code))
       then
         Misc.fatal_errorf "Code ID mismatch:@ %a@ =@ %a"
-          Bound_symbols.Pattern.print bound_symbols Code.print code;
+          Bound_static.Pattern.print bound_static Code.print code;
       (* Nothing needs doing here as we've already added the code to the
          environment. *)
       env, r, updates
-    | Code code_id, Deleted_code ->
-      let env = Env.mark_code_id_as_deleted env code_id in
-      env, r, updates
+    | Code _, Deleted_code -> env, r, updates
     | Code _, Static_const static_const ->
       Misc.fatal_errorf "Only code can be bound by [Code] bindings:@ %a@ =@ %a"
-        Bound_symbols.Pattern.print bound_symbols SC.print static_const
+        Bound_static.Pattern.print bound_static SC.print static_const
     | (Set_of_closures _ | Block_like _), Code code ->
       Misc.fatal_errorf
         "Pieces of code cannot be bound by [Block_like] or [Set_of_closures] \
          bindings:@ %a@ =@ %a"
-        Bound_symbols.Pattern.print bound_symbols Code.print code
+        Bound_static.Pattern.print bound_static Code.print code
     | (Set_of_closures _ | Block_like _), Deleted_code ->
       Misc.fatal_errorf
         "Deleted code cannot be bound by [Block_like] or [Set_of_closures] \
          bindings:@ %a@ =@ <deleted code>"
-        Bound_symbols.Pattern.print bound_symbols
+        Bound_static.Pattern.print bound_static
   in
   env, R.archive_data r, updates
 
-let static_consts0 env r ~params_and_body bound_symbols static_consts =
+let static_consts0 env r ~params_and_body bound_static static_consts =
   (* We cannot both build the environment and compile any functions in one
      traversal, as the bodies may contain direct calls to the code IDs being
      defined. *)
   let static_consts' = Static_const_group.to_list static_consts in
-  let bound_symbols' = Bound_symbols.to_list bound_symbols in
-  if not (List.compare_lengths bound_symbols' static_consts' = 0)
+  let bound_static' = Bound_static.to_list bound_static in
+  if not (List.compare_lengths bound_static' static_consts' = 0)
   then
     Misc.fatal_errorf
-      "Mismatch between [Bound_symbols] and [Static_const]s:@ %a@ =@ %a"
-      Bound_symbols.print bound_symbols Static_const_group.print static_consts;
-  let env =
-    ListLabels.fold_left static_consts' ~init:env ~f:(fun env static_const ->
-        match Static_const_or_code.to_code static_const with
-        | None -> env
-        | Some code -> update_env_for_code env code)
-  in
+      "Mismatch between [Bound_static] and [Static_const]s:@ %a@ =@ %a"
+      Bound_static.print bound_static Static_const_group.print static_consts;
   let r =
     ListLabels.fold_left static_consts' ~init:r ~f:(fun r static_const ->
         match Static_const_or_code.to_code static_const with
         | None -> r
         | Some code -> add_functions env ~params_and_body r code)
   in
-  ListLabels.fold_left2 bound_symbols' static_consts' ~init:(env, r, None)
+  ListLabels.fold_left2 bound_static' static_consts' ~init:(env, r, None)
     ~f:(fun (env, r, updates) bound_symbol_pat const ->
-      static_const_or_code env r ~updates ~params_and_body bound_symbol_pat
-        const)
+      static_const_or_code env r ~updates bound_symbol_pat const)
 
-let static_consts env r ~params_and_body bound_symbols static_consts =
+let static_consts env r ~params_and_body bound_static static_consts =
   try
     (* Gc roots: statically allocated blocks themselves do not need to be
        scanned, however if statically allocated blocks contain dynamically
@@ -432,24 +547,23 @@ let static_consts env r ~params_and_body bound_symbols static_consts =
     let roots =
       if Static_const_group.is_fully_static static_consts
       then []
-      else Bound_symbols.gc_roots bound_symbols
+      else Bound_static.gc_roots bound_static
     in
     let r = R.add_gc_roots r roots in
-    static_consts0 env r ~params_and_body bound_symbols static_consts
+    static_consts0 env r ~params_and_body bound_static static_consts
   with Misc.Fatal_error as e ->
+    let bt = Printexc.get_raw_backtrace () in
     (* Create a new "let symbol" with a dummy body to better print the bound
        symbols and static consts. *)
-    let dummy_body = Expr.create_invalid () in
+    let dummy_body = Expr.create_invalid To_cmm_dummy_body in
     let tmp_let_symbol =
       Let.create
-        (Bound_pattern.symbols bound_symbols)
+        (Bound_pattern.static bound_static)
         (Named.create_static_consts static_consts)
         ~body:dummy_body ~free_names_of_body:(Known Name_occurrences.empty)
       |> Expr.create_let
     in
     Format.eprintf
-      "\n@[<v 0>%sContext is:%s translating `let symbol' to Cmm:@ %a@."
-      (Flambda_colours.error ())
-      (Flambda_colours.normal ())
-      Expr.print tmp_let_symbol;
-    raise e
+      "\n@[<v 0>%tContext is:%t translating `let symbol' to Cmm:@ %a@."
+      Flambda_colours.error Flambda_colours.pop Expr.print tmp_let_symbol;
+    Printexc.raise_with_backtrace e bt

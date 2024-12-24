@@ -15,11 +15,13 @@
 
 (* Second intermediate language (machine independent) *)
 
-type machtype_component =
+type machtype_component = Cmx_format.machtype_component =
   | Val
   | Addr
   | Int
   | Float
+  | Vec128
+  | Float32
 
 (* - [Val] denotes a valid OCaml value: either a pointer to the beginning
      of a heap block, an infix pointer if it is preceded by the correct
@@ -54,6 +56,8 @@ val typ_val: machtype
 val typ_addr: machtype
 val typ_int: machtype
 val typ_float: machtype
+val typ_float32: machtype
+val typ_vec128: machtype
 
 (** Least upper bound of two [machtype_component]s. *)
 val lub_component
@@ -72,7 +76,9 @@ type exttype =
   | XInt                                (**r OCaml value, word-sized integer *)
   | XInt32                              (**r 32-bit integer *)
   | XInt64                              (**r 64-bit integer  *)
+  | XFloat32                            (**r single-precision FP number *)
   | XFloat                              (**r double-precision FP number  *)
+  | XVec128                             (**r 128-bit vector *)
 (** A variant of [machtype] used to describe arguments
     to external C functions *)
 
@@ -91,18 +97,22 @@ type float_comparison = Lambda.float_comparison =
 val negate_float_comparison: float_comparison -> float_comparison
 val swap_float_comparison: float_comparison -> float_comparison
 
-type label = int
+type label = Label.t
 val new_label: unit -> label
 val set_label: label -> unit
 val cur_label: unit -> label
 
 type exit_label =
   | Return_lbl
-  | Lbl of label
+  | Lbl of Lambda.static_label
 
 type rec_flag = Nonrecursive | Recursive
 
 type prefetch_temporal_locality_hint = Nonlocal | Low | Moderate | High
+
+type atomic_op = Fetch_and_add | Compare_and_swap
+
+type atomic_bitwidth = Thirtytwo | Sixtyfour | Word
 
 type effects = No_effects | Arbitrary_effects
 type coeffects = No_coeffects | Has_coeffects
@@ -134,23 +144,31 @@ type phantom_defining_expr =
   (** The phantom-let-bound variable points at a block with the given
       structure. *)
 
-type trywith_shared_label = int (* Same as Ccatch handlers *)
+type trywith_shared_label = Lambda.static_label (* Same as Ccatch handlers *)
 
 type trap_action =
   | Push of trywith_shared_label
   (** Add the corresponding handler to the trap stack. *)
-  | Pop
+  | Pop of trywith_shared_label
   (** Remove the last handler from the trap stack. *)
 
-type trywith_kind =
-  | Regular
-  (** Regular trywith: an uncaught exception from the body will always be
-      handled by this handler. *)
-  | Delayed of trywith_shared_label
-  (** The body starts with the previous exception handler, and only after going
-      through an explicit Push-annotated Cexit will this handler become active.
-      This allows for sharing a single handler in several places, or having
-      multiple entry and exit points to a single trywith block. *)
+type bswap_bitwidth = Sixteen | Thirtytwo | Sixtyfour
+
+type initialization_or_assignment =
+  | Initialization
+  | Assignment
+
+type float_width =
+  | Float64
+  | Float32
+
+type vec128_type =
+  | Int8x16
+  | Int16x8
+  | Int32x4
+  | Int64x2
+  | Float32x4
+  | Float64x2
 
 type memory_chunk =
     Byte_unsigned
@@ -161,12 +179,48 @@ type memory_chunk =
   | Thirtytwo_signed
   | Word_int                           (* integer or pointer outside heap *)
   | Word_val                           (* pointer inside heap or encoded int *)
-  | Single
+  | Single of { reg : float_width }    (* F32 on the heap, may be F32 or F64
+                                          in registers. *)
   | Double                             (* word-aligned 64-bit float
                                           see PR#10433 *)
+  | Onetwentyeight_unaligned           (* word-aligned 128-bit vector *)
+  | Onetwentyeight_aligned             (* 16-byte-aligned 128-bit vector *)
 
-and operation =
-    Capply of machtype
+(* These casts compile to a single move instruction. If the operands are assigned
+   the same physical register, the move will be omitted entirely. *)
+type reinterpret_cast =
+  | Int_of_value
+  | Value_of_int
+  | Float_of_float32 (* Only writes the bottom 32 bits of the target float register.
+                        All other bits are unspecified. *)
+  | Float32_of_float
+  | Float_of_int64
+  | Int64_of_float
+  | Float32_of_int32
+  | Int32_of_float32
+  | V128_of_v128 (* Converts between vector types of the same width. *)
+
+(* These casts may require a particular value-preserving operation, e.g. truncating
+   a float to an int. *)
+type static_cast =
+  | Float_of_int of float_width
+  | Int_of_float of float_width
+  | Float_of_float32
+  | Float32_of_float
+  | V128_of_scalar of vec128_type
+  | Scalar_of_v128 of vec128_type
+
+module Alloc_mode : sig
+  type t = Heap | Local
+
+  val equal : t -> t -> bool
+  val print : Format.formatter -> t -> unit
+  val is_local : t -> bool
+  val is_heap  : t -> bool
+end
+
+type operation =
+    Capply of machtype * Lambda.region_close
   | Cextcall of
       { func: string;
         ty: machtype;
@@ -179,40 +233,87 @@ and operation =
       }
       (** The [machtype] is the machine type of the result.
           The [exttype list] describes the unboxing types of the arguments.
-          An empty list means "all arguments are machine words [XInt]". *)
-  | Cload of memory_chunk * Asttypes.mutable_flag
-  | Calloc
-  | Cstore of memory_chunk * Lambda.initialization_or_assignment
+          An empty list means "all arguments are machine words [XInt]".
+          The boolean indicates whether the function may allocate. *)
+  | Cload of
+      { memory_chunk: memory_chunk;
+        mutability: Asttypes.mutable_flag;
+        is_atomic: bool;
+      }
+  | Calloc of Alloc_mode.t
+  | Cstore of memory_chunk * initialization_or_assignment
   | Caddi | Csubi | Cmuli | Cmulhi of { signed: bool }  | Cdivi | Cmodi
   | Cand | Cor | Cxor | Clsl | Clsr | Casr
+  | Cbswap of { bitwidth: bswap_bitwidth; }
+  | Ccsel of machtype
   | Cclz of { arg_is_non_zero: bool; }
   | Cctz of { arg_is_non_zero: bool; }
   | Cpopcnt
   | Cprefetch of { is_write: bool; locality: prefetch_temporal_locality_hint; }
+  | Catomic of { op: atomic_op; size : atomic_bitwidth }
   | Ccmpi of integer_comparison
   | Caddv (* pointer addition that produces a [Val] (well-formed Caml value) *)
   | Cadda (* pointer addition that produces a [Addr] (derived heap pointer) *)
   | Ccmpa of integer_comparison
-  | Cnegf | Cabsf
-  | Caddf | Csubf | Cmulf | Cdivf
-  | Cfloatofint | Cintoffloat
-  | Ccmpf of float_comparison
+  | Cnegf of float_width | Cabsf of float_width
+  | Caddf of float_width | Csubf of float_width
+  | Cmulf of float_width | Cdivf of float_width
+  | Cpackf32
+  | Creinterpret_cast of reinterpret_cast
+  | Cstatic_cast of static_cast
+  | Ccmpf of float_width * float_comparison
   | Craise of Lambda.raise_kind
-  | Ccheckbound (* Takes two arguments : first the bound to check against,
-                   then the index.
-                   It results in a bounds error if the index is greater than
-                   or equal to the bound. *)
-  | Cprobe of { name: string; handler_code_sym: string; }
+  | Cprobe of { name: string; handler_code_sym: string; enabled_at_init: bool }
   | Cprobe_is_enabled of { name: string }
   | Copaque (* Sys.opaque_identity *)
+  | Cbeginregion | Cendregion
+  | Ctuple_field of int * machtype array
+      (* the [machtype array] refers to the whole tuple *)
+  | Cdls_get
+  | Cpoll
+
+(* This is information used exclusively during construction of cmm terms by
+   cmmgen, and thus irrelevant for selectgen and flambda2. *)
+type kind_for_unboxing =
+  | Any (* This may contain anything, including non-scannable things *)
+  | Boxed_integer of Lambda.boxed_integer
+  | Boxed_vector of Lambda.boxed_vector
+  | Boxed_float of Lambda.boxed_float
+
+type is_global = Global | Local
+val equal_is_global : is_global -> is_global -> bool
+
+(* Symbols are marked with whether they are local or global,
+   at both definition and use sites.
+
+   Symbols defined as [Local] may only be referenced within the same file,
+   and all such references must also be [Local].
+
+   Symbols defined as [Global] may be referenced from other files.
+   References from other files must be [Global], but references from the
+   same file may be [Local].
+
+   (Marking symbols in this way speeds up linking, as many references can
+   then be resolved early) *)
+type symbol =
+  { sym_name : string;
+    sym_global : is_global }
+
+(* SIMD vectors are untyped in the backend.
+   This record holds the bitwise representation of a 128-bit value. *)
+type vec128_bits = { low : int64; high: int64 }
+
+val global_symbol : string -> symbol
 
 (** Every basic block should have a corresponding [Debuginfo.t] for its
     beginning. *)
-and expression =
+type expression =
     Cconst_int of int * Debuginfo.t
   | Cconst_natint of nativeint * Debuginfo.t
+  | Cconst_float32 of float * Debuginfo.t
   | Cconst_float of float * Debuginfo.t
-  | Cconst_symbol of string * Debuginfo.t
+  | Cconst_vec128 of vec128_bits * Debuginfo.t
+  | Cconst_symbol of symbol * Debuginfo.t
   | Cvar of Backend_var.t
   | Clet of Backend_var.With_provenance.t * expression * expression
   | Clet_mut of Backend_var.With_provenance.t * machtype
@@ -225,40 +326,61 @@ and expression =
   | Cop of operation * expression list * Debuginfo.t
   | Csequence of expression * expression
   | Cifthenelse of expression * Debuginfo.t * expression
-      * Debuginfo.t * expression * Debuginfo.t
+      * Debuginfo.t * expression * Debuginfo.t * kind_for_unboxing
   | Cswitch of expression * int array * (expression * Debuginfo.t) array
-      * Debuginfo.t
+      * Debuginfo.t * kind_for_unboxing
   | Ccatch of
       rec_flag
-        * (label * (Backend_var.With_provenance.t * machtype) list
-          * expression * Debuginfo.t) list
+        * (Lambda.static_label * (Backend_var.With_provenance.t * machtype) list
+          * expression * Debuginfo.t * bool (* is_cold *)) list
         * expression
+        * kind_for_unboxing
   | Cexit of exit_label * expression list * trap_action list
-  | Ctrywith of expression * trywith_kind * Backend_var.With_provenance.t
-      * expression * Debuginfo.t
+  | Ctrywith of expression * trywith_shared_label
+      * Backend_var.With_provenance.t * expression * Debuginfo.t
+      * kind_for_unboxing
+    (** Ctrywith uses "delayed handlers":
+        The body starts with the previous exception handler, and only after
+        going through an explicit Push-annotated Cexit will this handler become
+        active.  This allows for sharing a single handler in several places, or
+        having multiple entry and exit points to a single trywith block. *)
 
 type codegen_option =
   | Reduce_code_size
   | No_CSE
+  | Use_linscan_regalloc
+  | Assume_zero_alloc of { strict: bool; never_returns_normally: bool;
+                never_raises: bool;
+                loc: Location.t }
+  | Check_zero_alloc of { strict: bool; loc: Location.t }
 
 type fundecl =
-  { fun_name: string;
+  { fun_name: symbol;
     fun_args: (Backend_var.With_provenance.t * machtype) list;
     fun_body: expression;
     fun_codegen_options : codegen_option list;
+    fun_poll: Lambda.poll_attribute;
     fun_dbg : Debuginfo.t;
   }
 
+(** When data items that are less than 64 bits wide occur in blocks, whose
+    fields are 64-bits wide, the following rules apply:
+
+    - For int32, the value is sign extended.
+    - For float32, the value is zero extended.  It is ok to rely on
+      zero-initialization of the data section to achieve this.
+*)
 type data_item =
-    Cdefine_symbol of string
-  | Cglobal_symbol of string
+    Cdefine_symbol of symbol
   | Cint8 of int
   | Cint16 of int
   | Cint32 of nativeint
   | Cint of nativeint
   | Csingle of float
   | Cdouble of float
-  | Csymbol_address of string
+  | Cvec128 of vec128_bits
+  | Csymbol_address of symbol
+  | Csymbol_offset of symbol * int
   | Cstring of string
   | Cskip of int
   | Calign of int
@@ -268,8 +390,9 @@ type phrase =
   | Cdata of data_item list
 
 val ccatch :
-     label * (Backend_var.With_provenance.t * machtype) list
-       * expression * expression * Debuginfo.t
+     Lambda.static_label * (Backend_var.With_provenance.t * machtype) list
+       * expression * expression * Debuginfo.t * kind_for_unboxing
+       * bool
   -> expression
 
 val reset : unit -> unit
@@ -283,17 +406,30 @@ val iter_shallow_tail: (expression -> unit) -> expression -> bool
       considered to be in tail position (because their result become
       the final result for the expression).  *)
 
-val map_tail: (expression -> expression) -> expression -> expression
+val map_shallow_tail: ?kind:kind_for_unboxing -> (expression -> expression) -> expression -> expression
+  (** Apply the transformation to those immediate sub-expressions of an
+      expression that are in tail position, using the same definition of "tail"
+      as [iter_shallow_tail] *)
+
+val map_tail: ?kind:kind_for_unboxing -> (expression -> expression) -> expression -> expression
   (** Apply the transformation to an expression, trying to push it
-      to all inner sub-expressions that can produce the final result.
-      Same disclaimer as for [iter_shallow_tail] about the notion
-      of "tail" sub-expression. *)
+      to all inner sub-expressions that can produce the final result,
+      by recursively applying map_shallow_tail *)
+
+val iter_shallow: (expression -> unit) -> expression -> unit
+  (** Apply the callback to each immediate sub-expression. *)
 
 val map_shallow: (expression -> expression) -> expression -> expression
   (** Apply the transformation to each immediate sub-expression. *)
 
 val equal_machtype_component : machtype_component -> machtype_component -> bool
 val equal_exttype : exttype -> exttype -> bool
+val equal_static_cast : static_cast -> static_cast -> bool
+val equal_reinterpret_cast : reinterpret_cast -> reinterpret_cast -> bool
+val equal_float_width : float_width -> float_width -> bool
 val equal_float_comparison : float_comparison -> float_comparison -> bool
 val equal_memory_chunk : memory_chunk -> memory_chunk -> bool
 val equal_integer_comparison : integer_comparison -> integer_comparison -> bool
+
+val caml_flambda2_invalid : string
+val is_val : machtype_component -> bool

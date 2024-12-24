@@ -1,5 +1,3 @@
-[@@@ocaml.warning "-30"]
-
 type location = Lambda.scoped_location
 
 type 'a located =
@@ -13,9 +11,9 @@ type continuation_id = string located
 
 type code_id = string located
 
-type closure_id = string located
+type function_slot = string located
 
-type var_within_closure = string located
+type value_slot = string located
 
 type compilation_unit =
   { ident : string;
@@ -49,12 +47,18 @@ type continuation_sort =
 (* There's also [Return] and [Toplevel_return], but those don't need to be
  * specified explicitly *)
 
+type region =
+  | Named of variable
+  | Toplevel
+
 type const =
   | Naked_immediate of immediate
   | Tagged_immediate of immediate
+  | Naked_float32 of float
   | Naked_float of float
   | Naked_int32 of int32
   | Naked_int64 of int64
+  | Naked_vec128 of Vector_types.Vec128.Bit_pattern.bits
   | Naked_nativeint of targetint
 
 type field_of_block =
@@ -73,6 +77,8 @@ type mutability = Mutability.t =
   | Immutable
   | Immutable_unique
 
+type empty_array_kind = Empty_array_kind.t
+
 type 'a or_variable =
   | Const of 'a
   | Var of variable
@@ -83,60 +89,52 @@ type static_data =
         mutability : mutability;
         elements : field_of_block list
       }
+  | Boxed_float32 of float or_variable
   | Boxed_float of float or_variable
   | Boxed_int32 of int32 or_variable
   | Boxed_int64 of int64 or_variable
   | Boxed_nativeint of targetint or_variable
+  | Boxed_vec128 of Vector_types.Vec128.Bit_pattern.bits or_variable
   | Immutable_float_block of float or_variable list
   | Immutable_float_array of float or_variable list
-  | Empty_array
+  | Immutable_value_array of field_of_block list
+  | Empty_array of empty_array_kind
   | Mutable_string of { initial_value : string }
   | Immutable_string of string
 
-type naked_number_kind = Flambda_kind.Naked_number_kind.t =
-  | Naked_immediate
-  | Naked_float
-  | Naked_int32
-  | Naked_int64
-  | Naked_nativeint
+type kind = Flambda_kind.t
 
-type kind =
-  (* can't alias because Flambda_kind.t is private *)
-  | Value
-  | Naked_number of naked_number_kind
-  | Fabricated
-  | Rec_info
-
-type kind_with_subkind =
-  (* can't alias for same reason as [kind] *)
-  | Any_value
-  | Block of
-      { tag : Tag.t;
-        fields : kind_with_subkind list
-      }
-  | Float_block of { num_fields : int }
-  | Naked_number of naked_number_kind
+type subkind =
+  | Anything
+  | Boxed_float32
   | Boxed_float
   | Boxed_int32
   | Boxed_int64
   | Boxed_nativeint
+  | Boxed_vec128
   | Tagged_immediate
-  | Rec_info
+  | Variant of
+      { consts : targetint list;
+        non_consts : (tag_scannable * kind_with_subkind list) list
+      }
+  | Float_block of { num_fields : int }
   | Float_array
   | Immediate_array
   | Value_array
   | Generic_array
+
+and kind_with_subkind =
+  | Value of subkind
+  | Naked_number of Flambda_kind.Naked_number_kind.t
+  | Region
+  | Rec_info
 
 type static_data_binding =
   { symbol : symbol;
     defining_expr : static_data
   }
 
-type invalid_term_semantics = Invalid_term_semantics.t =
-  | Treat_as_unreachable
-  | Halt_and_catch_fire
-
-type raise_kind = Trap_action.raise_kind =
+type raise_kind = Trap_action.Raise_kind.t =
   | Regular
   | Reraise
   | No_trace
@@ -182,13 +180,20 @@ type array_kind = Flambda_primitive.Array_kind.t =
   | Immediates
   | Values
   | Naked_floats
+  | Naked_float32s
+  | Naked_int32s
+  | Naked_int64s
+  | Naked_nativeints
+  | Naked_vec128s
+  | Unboxed_product of array_kind list
 
 type box_kind = Flambda_kind.Boxable_number.t =
+  | Naked_float32
   | Naked_float
   | Naked_int32
   | Naked_int64
   | Naked_nativeint
-  | Untagged_immediate
+  | Naked_vec128
 
 type generic_array_specialisation =
   | No_specialisation
@@ -218,6 +223,7 @@ type standard_int = Flambda_kind.Standard_int.t =
 type standard_int_or_float = Flambda_kind.Standard_int_or_float.t =
   | Tagged_immediate
   | Naked_immediate
+  | Naked_float32
   | Naked_float
   | Naked_int32
   | Naked_int64
@@ -227,23 +233,33 @@ type string_or_bytes = Flambda_primitive.string_or_bytes =
   | String
   | Bytes
 
-type init_or_assign = Flambda_primitive.Init_or_assign.t =
-  | Initialization
-  | Assignment
+type alloc_mode_for_allocations =
+  | Heap
+  | Local of { region : region }
 
-type comparison = Flambda_primitive.comparison =
+type alloc_mode_for_applications =
+  | Heap
+  | Local of
+      { region : region;
+        ghost_region : region
+      }
+
+type alloc_mode_for_assignments =
+  | Heap
+  | Local
+
+type init_or_assign =
+  | Initialization
+  | Assignment of alloc_mode_for_assignments
+
+type 'signed_or_unsigned comparison =
+      'signed_or_unsigned Flambda_primitive.comparison =
   | Eq
   | Neq
-  | Lt
-  | Gt
-  | Le
-  | Ge
-
-type ordered_comparison = Flambda_primitive.ordered_comparison =
-  | Lt
-  | Gt
-  | Le
-  | Ge
+  | Lt of 'signed_or_unsigned
+  | Gt of 'signed_or_unsigned
+  | Le of 'signed_or_unsigned
+  | Ge of 'signed_or_unsigned
 
 type equality_comparison = Flambda_primitive.equality_comparison =
   | Eq
@@ -253,30 +269,55 @@ type signed_or_unsigned = Flambda_primitive.signed_or_unsigned =
   | Signed
   | Unsigned
 
+type nullop =
+  | Begin_region of { ghost : bool }
+  | Begin_try_region of { ghost : bool }
+
+type unary_int_arith_op = Flambda_primitive.unary_int_arith_op =
+  | Neg
+  | Swap_byte_endianness
+
+type array_kind_for_length = Flambda_primitive.Array_kind_for_length.t =
+  | Array_kind of array_kind
+  | Float_array_opt_dynamic
+
 type unop =
-  | Array_length
-  | Box_number of box_kind
+  | Block_load of
+      { kind : block_access_kind;
+        mut : mutability;
+        field : Targetint_31_63.t
+      }
+  | Array_length of array_kind_for_length
+  | Boolean_not
+  | Box_number of box_kind * alloc_mode_for_allocations
+  | End_region of { ghost : bool }
+  | End_try_region of { ghost : bool }
   | Get_tag
+  | Int_arith of standard_int * unary_int_arith_op
+  | Is_flat_float_array
   | Is_int
   | Num_conv of
       { src : standard_int_or_float;
         dst : standard_int_or_float
       }
   | Opaque_identity
-  | Project_var of
-      { project_from : closure_id;
-        var : var_within_closure
+  | Project_value_slot of
+      { project_from : function_slot;
+        value_slot : value_slot
       }
-  | Select_closure of
-      { move_from : closure_id;
-        move_to : closure_id
+  | Project_function_slot of
+      { move_from : function_slot;
+        move_to : function_slot
       }
   | String_length of string_or_bytes
   | Unbox_number of box_kind
+  | Untag_immediate
+  | Tag_immediate
 
-type 'a comparison_behaviour = 'a Flambda_primitive.comparison_behaviour =
-  | Yielding_bool of 'a
-  | Yielding_int_like_compare_functions
+type 'signed_or_unsigned comparison_behaviour =
+      'signed_or_unsigned Flambda_primitive.comparison_behaviour =
+  | Yielding_bool of 'signed_or_unsigned comparison
+  | Yielding_int_like_compare_functions of 'signed_or_unsigned
 
 type binary_int_arith_op = Flambda_primitive.binary_int_arith_op =
   | Add
@@ -299,30 +340,76 @@ type binary_float_arith_op = Flambda_primitive.binary_float_arith_op =
   | Mul
   | Div
 
+type string_accessor_width = Flambda_primitive.string_accessor_width =
+  | Eight
+  | Sixteen
+  | Thirty_two
+  | Single
+  | Sixty_four
+  | One_twenty_eight of { aligned : bool }
+
+type array_load_kind = Flambda_primitive.Array_load_kind.t =
+  | Immediates
+  | Values
+  | Naked_floats
+  | Naked_float32s
+  | Naked_int32s
+  | Naked_int64s
+  | Naked_nativeints
+  | Naked_vec128s
+
+type array_set_kind =
+  | Immediates
+  | Values of init_or_assign
+  | Naked_floats
+  | Naked_float32s
+  | Naked_int32s
+  | Naked_int64s
+  | Naked_nativeints
+  | Naked_vec128s
+
+type string_like_value = Flambda_primitive.string_like_value =
+  | String
+  | Bytes
+  | Bigstring
+
+type bytes_like_value = Flambda_primitive.bytes_like_value =
+  | Bytes
+  | Bigstring
+
+type float_bitwidth = Flambda_primitive.float_bitwidth
+
 type infix_binop =
   | Int_arith of binary_int_arith_op (* on tagged immediates *)
   | Int_shift of int_shift_op (* on tagged immediates *)
-  | Int_comp of ordered_comparison comparison_behaviour (* on tagged imms *)
-  | Float_arith of binary_float_arith_op
-  | Float_comp of comparison comparison_behaviour
+  | Int_comp of signed_or_unsigned comparison_behaviour (* on tagged imms *)
+  | Float_arith of float_bitwidth * binary_float_arith_op
+  | Float_comp of float_bitwidth * unit comparison_behaviour
 
 type binop =
-  | Array_load of array_kind * mutability
-  | Block_load of block_access_kind * mutability
-  | Phys_equal of kind option * equality_comparison
+  | Block_set of
+      { kind : block_access_kind;
+        init : init_or_assign;
+        field : Targetint_31_63.t
+      }
+  | Array_load of array_kind * array_load_kind * mutability
+  | Phys_equal of equality_comparison
   | Int_arith of standard_int * binary_int_arith_op
-  | Int_comp of
-      standard_int
-      * signed_or_unsigned
-      * ordered_comparison comparison_behaviour
+  | Int_comp of standard_int * signed_or_unsigned comparison_behaviour
   | Int_shift of standard_int * int_shift_op
   | Infix of infix_binop
+  | String_or_bigstring_load of string_like_value * string_accessor_width
+  | Bigarray_get_alignment of int
 
-type ternop = Array_set of array_kind * init_or_assign
+type ternop =
+  | Array_set of array_kind * array_set_kind
+  | Bytes_or_bigstring_set of bytes_like_value * string_accessor_width
 
-type varop = Make_block of tag_scannable * mutability
+type varop =
+  | Make_block of tag_scannable * mutability * alloc_mode_for_allocations
 
 type prim =
+  | Nullary of nullop
   | Unary of unop * simple
   | Binary of binop * simple * simple
   | Ternary of ternop * simple * simple * simple
@@ -333,9 +420,10 @@ type arity = kind_with_subkind list
 type function_call =
   | Direct of
       { code_id : code_id;
-        closure_id : closure_id option
+        function_slot : function_slot option;
+        alloc : alloc_mode_for_applications
       }
-  | Indirect
+  | Indirect of alloc_mode_for_applications
 (* Will translate to indirect_known_arity or indirect_unknown_arity depending on
    whether the apply record's arities field has a value *)
 
@@ -361,7 +449,7 @@ type inline_attribute = Inline_attribute.t =
   | Unroll of int
   | Default_inline
 
-type inlined_attribute = Inlined_attribute.t =
+type inlined_attribute =
   | Always_inlined
   | Hint_inlined
   | Never_inlined
@@ -370,8 +458,15 @@ type inlined_attribute = Inlined_attribute.t =
 
 type inlining_state = { depth : int (* CR lmaurer: Add inlining arguments *) }
 
+type loopify_attribute = Loopify_attribute.t =
+  | Always_loopify
+  | Never_loopify
+  | Already_loopified
+  | Default_loopify_and_tailrec
+  | Default_loopify_and_not_tailrec
+
 type apply =
-  { func : name;
+  { func : simple;
     continuation : result_continuation;
     exn_continuation : continuation;
     args : simple list;
@@ -399,18 +494,18 @@ type expr =
       { scrutinee : simple;
         cases : (int * apply_cont) list
       }
-  | Invalid of invalid_term_semantics
+  | Invalid of { message : string }
 
-and closure_elements = closure_element list
+and value_slots = one_value_slot list
 
-and closure_element =
-  { var : var_within_closure;
+and one_value_slot =
+  { var : value_slot;
     value : simple
   }
 
 and let_ =
   { bindings : let_binding list;
-    closure_elements : closure_elements option;
+    value_slots : value_slots option;
     body : expr
   }
 
@@ -427,7 +522,9 @@ and named =
 
 and fun_decl =
   { code_id : code_id;
-    closure_id : closure_id option (* defaults to same name as code id *)
+    function_slot : function_slot option (* defaults to same name as code id *);
+    alloc : alloc_mode_for_allocations
+        (* alloc mode for set of closures (ignored except on first binding) *)
   }
 
 and let_cont =
@@ -446,7 +543,7 @@ and continuation_binding =
 and let_symbol =
   { bindings : symbol_binding list;
     (* Only used if there's no [Set_of_closures] in the list *)
-    closure_elements : closure_elements option;
+    value_slots : value_slots option;
     body : expr
   }
 
@@ -459,7 +556,7 @@ and symbol_binding =
 
 and static_set_of_closures =
   { bindings : static_closure_binding list;
-    elements : closure_elements option
+    elements : value_slots option
   }
 
 and code =
@@ -471,7 +568,9 @@ and code =
     inline : inline_attribute option;
     params_and_body : params_and_body;
     code_size : code_size;
-    is_tupled : bool
+    is_tupled : bool;
+    loopify : loopify_attribute option;
+    result_mode : alloc_mode_for_assignments
   }
 
 and code_size = int
@@ -479,6 +578,8 @@ and code_size = int
 and params_and_body =
   { params : kinded_parameter list;
     closure_var : variable;
+    region_var : variable;
+    ghost_region_var : variable;
     depth_var : variable;
     ret_cont : continuation_id;
     exn_cont : continuation_id;

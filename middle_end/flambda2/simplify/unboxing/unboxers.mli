@@ -14,22 +14,43 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 open! Simplify_import
 
 type number_decider =
   { param_name : string;
     kind : K.Naked_number_kind.t;
-    prove_is_a_boxed_number : TE.t -> T.t -> unit T.proof_allowing_kind_mismatch
+    prove_is_a_boxed_number : TE.t -> T.t -> unit T.proof_of_property
   }
 
 type unboxer =
   { var_name : string;
-    invalid_const : Const.t;
+    poison_const : Const.t;
     unboxing_prim : Simple.t -> P.t;
-    prove_simple : TE.t -> min_name_mode:Name_mode.t -> T.t -> Simple.t T.proof
+    prove_simple :
+      TE.t -> min_name_mode:Name_mode.t -> T.t -> Simple.t T.meet_shortcut
   }
+
+module Field : sig
+  val unboxing_prim :
+    P.Block_access_kind.t -> block:Simple.t -> index:Targetint_31_63.t -> P.t
+
+  val unboxer :
+    poison_const:Const.t ->
+    P.Block_access_kind.t ->
+    index:Targetint_31_63.t ->
+    unboxer
+end
+
+module Closure_field : sig
+  val unboxing_prim : Function_slot.t -> closure:Simple.t -> Value_slot.t -> P.t
+
+  val unboxer : Function_slot.t -> Value_slot.t -> unboxer
+end
+
+(* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   Each of these modules must be included in the global deciders list in
+   optimistic_unboxing_decision.ml
+   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! *)
 
 module type Number_S = sig
   val decider : number_decider
@@ -41,6 +62,8 @@ end
 
 module Immediate : Number_S
 
+module Float32 : Number_S
+
 module Float : Number_S
 
 module Int32 : Number_S
@@ -49,20 +72,4 @@ module Int64 : Number_S
 
 module Nativeint : Number_S
 
-module Field : sig
-  val unboxing_prim :
-    P.Block_access_kind.t -> block:Simple.t -> index:Targetint_31_63.t -> P.t
-
-  val unboxer :
-    invalid_const:Const.t ->
-    P.Block_access_kind.t ->
-    index:Targetint_31_63.t ->
-    unboxer
-end
-
-module Closure_field : sig
-  val unboxing_prim :
-    Closure_id.t -> closure:Simple.t -> Var_within_closure.t -> P.t
-
-  val unboxer : Closure_id.t -> Var_within_closure.t -> unboxer
-end
+module Vec128 : Number_S

@@ -14,10 +14,8 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 module RWC = Reg_width_const
-include Reg_width_things.Simple
+include Int_ids.Simple
 
 let const_bool b = const (if b then RWC.const_true else RWC.const_false)
 
@@ -28,6 +26,9 @@ let const_false = const_bool false
 let untagged_const_true = const RWC.untagged_const_true
 
 let untagged_const_false = const RWC.untagged_const_false
+
+let untagged_const_bool b =
+  if b then untagged_const_true else untagged_const_false
 
 let untagged_const_zero = const RWC.untagged_const_zero
 
@@ -40,6 +41,8 @@ let const_zero = const RWC.const_zero
 let const_one = const RWC.const_one
 
 let const_unit = const RWC.const_unit
+
+let const_int_of_kind kind i = const (RWC.of_int_of_kind kind i)
 
 let[@inline always] is_var t =
   pattern_match t
@@ -114,7 +117,7 @@ let free_names t = free_names_with_mode t Name_mode.normal
 
 let free_names_in_types t = free_names_with_mode t Name_mode.in_types
 
-let apply_renaming t perm = Renaming.apply_simple perm t
+let apply_renaming t renaming = Renaming.apply_simple renaming t
 
 module List = struct
   type nonrec t = t list
@@ -137,12 +140,12 @@ module List = struct
       (fun free t -> Name_occurrences.union free (free_names t))
       Name_occurrences.empty t
 
-  let apply_renaming t perm =
+  let apply_renaming t renaming =
     let changed = ref false in
     let result =
       List.map
         (fun simple ->
-          let simple' = apply_renaming simple perm in
+          let simple' = apply_renaming simple renaming in
           if not (simple == simple') then changed := true;
           simple')
         t
@@ -172,7 +175,46 @@ module With_kind = struct
 
   let free_names (simple, _kind) = free_names simple
 
-  let apply_renaming ((simple, kind) as t) perm =
-    let simple' = apply_renaming simple perm in
+  let apply_renaming ((simple, kind) as t) renaming =
+    let simple' = apply_renaming simple renaming in
     if simple == simple' then t else simple', kind
+end
+
+module With_debuginfo = struct
+  type nonrec t = t * Debuginfo.t
+
+  include Container_types.Make (struct
+    type nonrec t = t
+
+    let compare (s1, k1) (s2, k2) =
+      let c = compare s1 s2 in
+      if c <> 0 then c else Debuginfo.compare k1 k2
+
+    let equal t1 t2 = compare t1 t2 = 0
+
+    let hash = Hashtbl.hash
+
+    let print ppf (s, k) =
+      if Debuginfo.is_none k
+      then print ppf s
+      else
+        Format.fprintf ppf "@[<hov 1>(%a@ %t%a%t)@]" print s
+          Flambda_colours.debuginfo Debuginfo.print_compact k
+          Flambda_colours.pop
+  end)
+
+  let create simple dbg = simple, dbg
+
+  let simple (simple, _dbg) = simple
+
+  let dbg (_simple, dbg) = dbg
+
+  let free_names (simple, _dbg) = free_names simple
+
+  let apply_renaming ((simple, dbg) as t) renaming =
+    let simple' = apply_renaming simple renaming in
+    if simple == simple' then t else simple', dbg
+
+  let ids_for_export (simple, _dbg) =
+    Ids_for_export.add_simple Ids_for_export.empty simple
 end

@@ -14,11 +14,10 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 type failure =
   | Division_by_zero
   | Index_out_of_bounds
+  | Address_was_misaligned
 
 type expr_primitive =
   | Simple of Simple.t
@@ -41,13 +40,19 @@ type expr_primitive =
         (* Predefined exception *)
         dbg : Debuginfo.t
       }
-  | If_then_else of expr_primitive * expr_primitive * expr_primitive
+  | If_then_else of
+      expr_primitive
+      * expr_primitive
+      * expr_primitive
+      * Flambda_kind.With_subkind.t list
+  | Sequence of expr_primitive list
+  | Unboxed_product of expr_primitive list
 
 and simple_or_prim =
   | Simple of Simple.t
   | Prim of expr_primitive
 
-val caml_ml_array_bound_error : Symbol.t
+val maybe_create_unboxed_product : expr_primitive list -> expr_primitive
 
 val print_expr_primitive : Format.formatter -> expr_primitive -> unit
 
@@ -56,13 +61,16 @@ val print_simple_or_prim : Format.formatter -> simple_or_prim -> unit
 val print_list_of_simple_or_prim :
   Format.formatter -> simple_or_prim list -> unit
 
+val print_list_of_lists_of_simple_or_prim :
+  Format.formatter -> simple_or_prim list list -> unit
+
 open Closure_conversion_aux
 
-val bind_rec :
+val bind_recs :
   Acc.t ->
   Exn_continuation.t option ->
-  register_const_string:(Acc.t -> string -> Acc.t * Symbol.t) ->
+  register_const0:(Acc.t -> Static_const.t -> string -> Acc.t * Symbol.t) ->
   expr_primitive ->
   Debuginfo.t ->
-  (Acc.t -> Flambda.Named.t -> Acc.t * Expr_with_acc.t) ->
-  Acc.t * Expr_with_acc.t
+  (Acc.t -> Flambda.Named.t list -> Expr_with_acc.t) ->
+  Expr_with_acc.t

@@ -14,25 +14,27 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 type t =
   { function_decls : Function_declarations.t;
-    closure_elements : Simple.t Var_within_closure.Map.t
+    value_slots : Simple.t Value_slot.Map.t;
+    alloc_mode : Alloc_mode.For_allocations.t
   }
 
 let [@ocamlformat "disable"] print ppf
       { function_decls;
-        closure_elements;
+        value_slots;
+        alloc_mode;
       } =
-  Format.fprintf ppf "@[<hov 1>(%sset_of_closures%s@ \
+  Format.fprintf ppf "@[<hov 1>(%tset_of_closures%t@ \
       @[<hov 1>(function_decls@ %a)@]@ \
-      @[<hov 1>(closure_elements@ %a)@]\
+      @[<hov 1>(value_slots@ %a)@]@ \
+      @[<hov 1>(alloc_mode@ %a)@]\
       )@]"
-    (Flambda_colours.prim_constructive ())
-    (Flambda_colours.normal ())
+    Flambda_colours.prim_constructive
+    Flambda_colours.pop
     (Function_declarations.print) function_decls
-    (Var_within_closure.Map.print Simple.print) closure_elements
+    (Value_slot.Map.print Simple.print) value_slots
+    Alloc_mode.For_allocations.print alloc_mode
 
 include Container_types.Make (struct
   type nonrec t = t
@@ -42,100 +44,119 @@ include Container_types.Make (struct
   let hash _ = Misc.fatal_error "Not yet implemented"
 
   let compare
-      { function_decls = function_decls1; closure_elements = closure_elements1 }
-      { function_decls = function_decls2; closure_elements = closure_elements2 }
-      =
+      { function_decls = function_decls1;
+        value_slots = value_slots1;
+        alloc_mode = alloc_mode1
+      }
+      { function_decls = function_decls2;
+        value_slots = value_slots2;
+        alloc_mode = alloc_mode2
+      } =
     let c = Function_declarations.compare function_decls1 function_decls2 in
     if c <> 0
     then c
     else
-      Var_within_closure.Map.compare Simple.compare closure_elements1
-        closure_elements2
+      let c = Value_slot.Map.compare Simple.compare value_slots1 value_slots2 in
+      if c <> 0
+      then c
+      else Alloc_mode.For_allocations.compare alloc_mode1 alloc_mode2
 
   let equal t1 t2 = compare t1 t2 = 0
 end)
 
-let empty =
-  { function_decls = Function_declarations.empty;
-    closure_elements = Var_within_closure.Map.empty
-  }
-
-let is_empty { function_decls; closure_elements } =
+let is_empty { function_decls; value_slots; alloc_mode = _ } =
   Function_declarations.is_empty function_decls
-  && Var_within_closure.Map.is_empty closure_elements
+  && Value_slot.Map.is_empty value_slots
 
-let create function_decls ~closure_elements =
-  (* CR mshinwell: Make sure invariant checks are applied here, e.g. that the
-     set of closures is indeed closed. *)
-  { function_decls; closure_elements }
+let create ~value_slots alloc_mode function_decls =
+  { function_decls; value_slots; alloc_mode }
 
 let function_decls t = t.function_decls
 
-let closure_elements t = t.closure_elements
+let value_slots t = t.value_slots
 
-let has_empty_environment t = Var_within_closure.Map.is_empty t.closure_elements
+let alloc_mode t = t.alloc_mode
 
-let environment_doesn't_mention_variables t =
-  Var_within_closure.Map.for_all
-    (fun _vwc simple -> Simple.is_symbol simple)
-    t.closure_elements
+let is_closed t = Value_slot.Map.is_empty t.value_slots
 
 let [@ocamlformat "disable"] print ppf
       { function_decls;
-        closure_elements;
+        value_slots;
+        alloc_mode;
       } =
-  if Var_within_closure.Map.is_empty closure_elements then
-    Format.fprintf ppf "@[<hov 1>(%sset_of_closures%s@ \
+  if Value_slot.Map.is_empty value_slots then
+    Format.fprintf ppf "@[<hov 1>(%tset_of_closures%t@ %a@ \
         @[<hov 1>%a@]\
         )@]"
-      (Flambda_colours.prim_constructive ())
-      (Flambda_colours.normal ())
+      Flambda_colours.prim_constructive
+      Flambda_colours.pop
+      Alloc_mode.For_allocations.print alloc_mode
       (Function_declarations.print) function_decls
   else
-    Format.fprintf ppf "@[<hov 1>(%sset_of_closures%s@ \
+    Format.fprintf ppf "@[<hov 1>(%tset_of_closures%t@ %a@ \
         @[<hov 1>%a@]@ \
         @[<hov 1>(env@ %a)@]\
         )@]"
-      (Flambda_colours.prim_constructive ())
-      (Flambda_colours.normal ())
-      (Function_declarations.print) function_decls
-      (Var_within_closure.Map.print Simple.print) closure_elements
+      Flambda_colours.prim_constructive
+      Flambda_colours.pop
+      Alloc_mode.For_allocations.print alloc_mode
+      Function_declarations.print function_decls
+      (Value_slot.Map.print Simple.print) value_slots
 
-let free_names { function_decls; closure_elements } =
-  (* We are here interested in the the uses of closure_id and
-     var_within_closure, so we do not count the closure_ids and
-     var_within_closures that are bound by a set of closures. Indeed, the
-     free_names will be used later to filter out unused env_vars from sets of
-     closures (in the offset computation and in to_cmm), so if they are added to
-     the free_names here, they can never be simplified away. *)
+let free_names { function_decls; value_slots; alloc_mode } =
+  let free_names_of_value_slots =
+    Value_slot.Map.fold
+      (fun value_slot simple free_names ->
+        Name_occurrences.union free_names
+          (Name_occurrences.add_value_slot_in_declaration
+             (Simple.free_names simple) value_slot Name_mode.normal))
+      value_slots Name_occurrences.empty
+  in
   Name_occurrences.union_list
     [ Function_declarations.free_names function_decls;
-      Simple.List.free_names (Var_within_closure.Map.data closure_elements) ]
+      free_names_of_value_slots;
+      Alloc_mode.For_allocations.free_names alloc_mode ]
 
-let apply_renaming ({ function_decls; closure_elements } as t) renaming =
+let apply_renaming ({ function_decls; value_slots; alloc_mode } as t) renaming =
+  let alloc_mode' =
+    Alloc_mode.For_allocations.apply_renaming alloc_mode renaming
+  in
   let function_decls' =
     Function_declarations.apply_renaming function_decls renaming
   in
-  let closure_elements' =
-    Var_within_closure.Map.filter_map
+  let changed = ref false in
+  let value_slots' =
+    Value_slot.Map.filter_map
       (fun var simple ->
-        if Renaming.closure_var_is_used renaming var
-        then Some (Simple.apply_renaming simple renaming)
-        else None)
-      closure_elements
+        if Renaming.value_slot_is_used renaming var
+        then (
+          let simple' = Simple.apply_renaming simple renaming in
+          if not (simple == simple') then changed := true;
+          Some simple')
+        else (
+          changed := true;
+          None))
+      value_slots
   in
-  if function_decls == function_decls' && closure_elements == closure_elements'
+  if alloc_mode == alloc_mode'
+     && function_decls == function_decls'
+     && not !changed
   then t
   else
-    { function_decls = function_decls'; closure_elements = closure_elements' }
+    { function_decls = function_decls';
+      value_slots = value_slots';
+      alloc_mode = alloc_mode'
+    }
 
-let all_ids_for_export { function_decls; closure_elements } =
+let ids_for_export { function_decls; value_slots; alloc_mode } =
   let function_decls_ids =
-    Function_declarations.all_ids_for_export function_decls
+    Function_declarations.ids_for_export function_decls
   in
-  Var_within_closure.Map.fold
-    (fun _closure_var simple ids -> Ids_for_export.add_simple ids simple)
-    closure_elements function_decls_ids
+  Ids_for_export.union
+    (Value_slot.Map.fold
+       (fun _value_slot simple ids -> Ids_for_export.add_simple ids simple)
+       value_slots function_decls_ids)
+    (Alloc_mode.For_allocations.ids_for_export alloc_mode)
 
 let filter_function_declarations t ~f =
   let function_decls = Function_declarations.filter t.function_decls ~f in

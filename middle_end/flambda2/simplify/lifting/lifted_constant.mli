@@ -14,12 +14,12 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
+(** Description of a group of statically-allocated values discovered during
+    simplification.
 
-(* CR mshinwell: The name of this module is a bit misleading *)
-
-(** Description of a group of statically-allocated constants discovered during
-    simplification. *)
+    The name of this module is unfortunately slightly misleading: these
+    statically-allocated values may be inconstant in the sense that they may
+    require initialisation at runtime before they can be read from. *)
 
 module Definition : sig
   type descr = private
@@ -27,7 +27,7 @@ module Definition : sig
     | Set_of_closures of
         { denv : Downwards_env.t;
           closure_symbols_with_types :
-            (Symbol.t * Flambda2_types.t) Closure_id.Lmap.t;
+            (Symbol.t * Flambda2_types.t) Function_slot.Lmap.t;
           symbol_projections : Symbol_projection.t Variable.Map.t
         }
     | Block_like of
@@ -49,7 +49,8 @@ module Definition : sig
 
   val set_of_closures :
     Downwards_env.t ->
-    closure_symbols_with_types:(Symbol.t * Flambda2_types.t) Closure_id.Lmap.t ->
+    closure_symbols_with_types:
+      (Symbol.t * Flambda2_types.t) Function_slot.Lmap.t ->
     symbol_projections:Symbol_projection.t Variable.Map.t ->
     Rebuilt_static_const.t ->
     t
@@ -62,7 +63,7 @@ module Definition : sig
     Rebuilt_static_const.t ->
     t
 
-  val bound_symbols : t -> Bound_symbols.t
+  val bound_static : t -> Bound_static.t
 
   val free_names : t -> Name_occurrences.t
 
@@ -85,7 +86,7 @@ val create_block_like :
 
 val create_set_of_closures :
   Downwards_env.t ->
-  closure_symbols_with_types:(Symbol.t * Flambda2_types.t) Closure_id.Lmap.t ->
+  closure_symbols_with_types:(Symbol.t * Flambda2_types.t) Function_slot.Lmap.t ->
   symbol_projections:Symbol_projection.t Variable.Map.t ->
   Rebuilt_static_const.t ->
   t
@@ -96,7 +97,7 @@ val create_definition : Definition.t -> t
 
 val definitions : t -> Definition.t list
 
-val bound_symbols : t -> Bound_symbols.t
+val bound_static : t -> Bound_static.t
 
 val defining_exprs : t -> Rebuilt_static_const.Group.t
 

@@ -18,8 +18,6 @@
     conversions and boxing/unboxing) in a standard form that can be fed to
     functors parametric in number kinds. *)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 module type Num_common = sig
   include Container_types.S
 
@@ -51,6 +49,8 @@ module type Num_common = sig
 
   val to_immediate : t -> Targetint_31_63.t
 
+  val to_naked_float32 : t -> Numeric_types.Float32_by_bit_pattern.t
+
   val to_naked_float : t -> Numeric_types.Float_by_bit_pattern.t
 
   val to_naked_int32 : t -> Numeric_types.Int32.t
@@ -68,7 +68,7 @@ module type Number_kind_common = sig
   val unboxed_prover :
     Flambda2_types.Typing_env.t ->
     Flambda2_types.t ->
-    Num.Set.t Flambda2_types.proof
+    Num.Set.t Flambda2_types.meet_shortcut
 
   val this_unboxed : Num.t -> Flambda2_types.t
 
@@ -118,18 +118,11 @@ module type Boxable = sig
 
   val boxable_number_kind : Flambda_kind.Boxable_number.t
 
-  val boxed_prover :
-    Flambda2_types.Typing_env.t ->
-    Flambda2_types.t ->
-    Num.Set.t Flambda2_types.proof
+  val this_boxed : Num.t -> Alloc_mode.For_types.t -> Flambda2_types.t
 
-  val this_boxed : Num.t -> Flambda2_types.t
+  val these_boxed : Num.Set.t -> Alloc_mode.For_types.t -> Flambda2_types.t
 
-  val these_boxed : Num.Set.t -> Flambda2_types.t
-
-  val box : Flambda2_types.t -> Flambda2_types.t
-
-  type naked_number_kind
+  val box : Flambda2_types.t -> Alloc_mode.For_types.t -> Flambda2_types.t
 end
 
 module type Boxable_number_kind = sig
@@ -147,6 +140,8 @@ end
 module For_tagged_immediates : Int_number_kind
 
 module For_naked_immediates : Int_number_kind
+
+module For_float32s : Boxable_number_kind
 
 module For_floats : Boxable_number_kind
 

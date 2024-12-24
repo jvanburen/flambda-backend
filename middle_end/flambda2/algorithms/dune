@@ -3,8 +3,7 @@
 (library
  (name flambda2_algorithms)
  (wrapped true)
- (flags
-  (:standard -principal -nostdlib))
+ (instrumentation (backend bisect_ppx))
  (ocamlopt_flags
-  (:standard -O3))
- (libraries stdlib ocamlcommon))
+  (:standard -O3 -open Int_replace_polymorphic_compare))
+ (libraries ocamlcommon))

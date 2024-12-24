@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 type t =
   { names_to_types :
       (Type_grammar.t * Binding_time.With_name_mode.t) Name.Map.t;
@@ -39,8 +37,6 @@ let print_name_modes ~restrict_to ~min_binding_time ppf t =
        (fun name _ -> Name.Set.mem name restrict_to)
        t.names_to_types)
 
-(* CR mshinwell: add [invariant] function *)
-
 let empty =
   { names_to_types = Name.Map.empty;
     aliases = Aliases.empty;
@@ -52,10 +48,6 @@ let names_to_types t = t.names_to_types
 let aliases t = t.aliases
 
 let symbol_projections t = t.symbol_projections
-
-(* CR mshinwell: At least before the following two functions were split (used to
-   be add-or-replace), the [names_to_types] map addition was a major source of
-   allocation. *)
 
 let add_or_replace_binding t (name : Name.t) ty binding_time name_mode =
   let binding_time_and_mode =
@@ -95,15 +87,28 @@ let clean_for_export t ~reachable_names =
   (* Names coming from other compilation units or unreachable are removed *)
   let current_compilation_unit = Compilation_unit.get_current_exn () in
   let names_to_types =
-    Name.Map.filter
-      (fun name _info ->
-        Name_occurrences.mem_name reachable_names name
-        && Compilation_unit.equal
-             (Name.compilation_unit name)
-             current_compilation_unit)
+    Name.Map.filter_map
+      (fun name (ty, binding_time_and_mode) ->
+        if Name_occurrences.mem_name reachable_names name
+           && Compilation_unit.equal
+                (Name.compilation_unit name)
+                current_compilation_unit
+        then (
+          let binding_time_and_mode =
+            if Name.is_var name
+            then Binding_time.With_name_mode.imported_variables
+            else binding_time_and_mode
+          in
+          (match Type_grammar.get_alias_opt ty with
+          | None -> ()
+          | Some alias ->
+            Misc.fatal_errorf "Remaining alias after cleanup: %a -> %a@."
+              Name.print name Simple.print alias);
+          Some (ty, binding_time_and_mode))
+        else None)
       t.names_to_types
   in
-  let aliases = Aliases.clean_for_export t.aliases ~reachable_names in
+  let aliases = Aliases.empty in
   { t with names_to_types; aliases }
 
 let apply_renaming { names_to_types; aliases; symbol_projections } renaming =
@@ -132,7 +137,7 @@ let merge t1 t2 =
   let names_to_types =
     Name.Map.disjoint_union t1.names_to_types t2.names_to_types
   in
-  let aliases = Aliases.merge t1.aliases t2.aliases in
+  let aliases = Aliases.empty in
   let symbol_projections =
     Variable.Map.union
       (fun var proj1 proj2 ->
@@ -147,15 +152,56 @@ let merge t1 t2 =
   in
   { names_to_types; aliases; symbol_projections }
 
-let remove_unused_closure_vars { names_to_types; aliases; symbol_projections }
-    ~used_closure_vars =
+let canonicalise t simple =
+  Simple.pattern_match simple
+    ~const:(fun _ -> simple)
+    ~name:(fun name ~coercion ->
+      Simple.apply_coercion_exn
+        (Aliases.get_canonical_ignoring_name_mode t.aliases name)
+        coercion)
+
+let remove_unused_value_slots_and_shortcut_aliases
+    ({ names_to_types; aliases; symbol_projections } as t) ~used_value_slots =
+  let canonicalise = canonicalise t in
   let names_to_types =
     Name.Map.map_sharing
       (fun ((ty, binding_time_and_mode) as info) ->
         let ty' =
-          Type_grammar.remove_unused_closure_vars ty ~used_closure_vars
+          Type_grammar.remove_unused_value_slots_and_shortcut_aliases ty
+            ~used_value_slots ~canonicalise
         in
         if ty == ty' then info else ty', binding_time_and_mode)
       names_to_types
   in
   { names_to_types; aliases; symbol_projections }
+
+let free_function_slots_and_value_slots
+    { names_to_types; aliases = _; symbol_projections } =
+  let from_projections =
+    Variable.Map.fold
+      (fun _var proj free_names ->
+        Name_occurrences.union free_names
+          (Name_occurrences.restrict_to_value_slots_and_function_slots
+             (Symbol_projection.free_names proj)))
+      symbol_projections Name_occurrences.empty
+  in
+  Name.Map.fold
+    (fun _name (ty, _binding_time) free_names ->
+      let free_names_of_ty = Type_grammar.free_names ty in
+      Name_occurrences.union free_names
+        (Name_occurrences.restrict_to_value_slots_and_function_slots
+           free_names_of_ty))
+    names_to_types from_projections
+
+let ids_for_export t =
+  if not (Aliases.is_empty t.aliases)
+  then
+    Misc.fatal_error
+      "Aliases structure must be empty for export; did you forget to call \
+       [clean_for_export]?";
+  Name.Map.fold
+    (fun name (typ, _binding_time_and_mode) ids ->
+      Ids_for_export.add_name
+        (Ids_for_export.union ids (Type_grammar.ids_for_export typ))
+        name)
+    (names_to_types t) Ids_for_export.empty

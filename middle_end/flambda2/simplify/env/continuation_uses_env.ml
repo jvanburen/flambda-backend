@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 module T = Flambda2_types
 
 type t = { continuation_uses : Continuation_uses.t Continuation.Map.t }
@@ -73,3 +71,9 @@ let remove t cont =
   { continuation_uses = Continuation.Map.remove cont t.continuation_uses }
 
 let delete_continuation_uses = remove
+
+let mark_non_inlinable { continuation_uses } =
+  let continuation_uses =
+    Continuation.Map.map Continuation_uses.mark_non_inlinable continuation_uses
+  in
+  { continuation_uses }

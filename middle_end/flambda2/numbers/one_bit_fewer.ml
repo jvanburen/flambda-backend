@@ -12,8 +12,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 module type S = sig
   type t
 
@@ -29,8 +27,6 @@ module type S = sig
 
   val max_value : t
 
-  val max_string_length : t
-
   val minus_one : t
 
   val zero : t
@@ -43,7 +39,11 @@ module type S = sig
 
   val ( <= ) : t -> t -> bool
 
+  val ( >= ) : t -> t -> bool
+
   val ( < ) : t -> t -> bool
+
+  val ( > ) : t -> t -> bool
 
   val bottom_byte_to_int : t -> int
 
@@ -136,8 +136,6 @@ module Make (I : S) : S with type t = I.t = struct
 
   let max_value = I.shift_right I.max_value 1
 
-  let max_string_length = I.min max_value I.max_string_length
-
   let minus_one = I.minus_one
 
   let zero = I.zero
@@ -150,9 +148,13 @@ module Make (I : S) : S with type t = I.t = struct
 
   let ( <= ) = I.( <= )
 
+  let ( >= ) = I.( >= )
+
   let ( < ) = I.( < )
 
-  let is_in_range n = n >= min_value && n <= max_value
+  let ( > ) = I.( > )
+
+  let is_in_range n = I.( >= ) n min_value && I.( <= ) n max_value
 
   let bottom_byte_to_int = I.bottom_byte_to_int
 
@@ -205,7 +207,8 @@ module Make (I : S) : S with type t = I.t = struct
 
   let mul x y = sign_extend (I.mul x y)
 
-  let mod_ x y = sign_extend (I.mod_ x y)
+  (* No sign-extension: the result is always in the correct range *)
+  let mod_ = I.mod_
 
   let div x y = sign_extend (I.div x y)
 
@@ -217,9 +220,11 @@ module Make (I : S) : S with type t = I.t = struct
 
   let shift_left t i = sign_extend (I.shift_left t i)
 
-  let shift_right t i = sign_extend (I.shift_right t i)
+  (* No sign-extension: the result is always in the correct range *)
+  let shift_right = I.shift_right
 
-  let shift_right_logical t i = I.shift_right_logical (I.shift_left t 1) (i + 1)
+  let shift_right_logical t i =
+    I.shift_right (I.shift_right_logical (I.shift_left t 1) i) 1
 
   let max = I.max
 

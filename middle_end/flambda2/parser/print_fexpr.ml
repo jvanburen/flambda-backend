@@ -1,5 +1,3 @@
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 open! Fexpr
 
 let pp_list ~sep f ppf =
@@ -10,6 +8,8 @@ let pp_star_list f = pp_list ~sep:" *@ " f
 let pp_comma_list f = pp_list ~sep:",@ " f
 
 let pp_semi_list f = pp_list ~sep:";@ " f
+
+let pp_pipe_list f = pp_list ~sep:"@ |" f
 
 let empty_fmt : (unit, Format.formatter, unit) format = ""
 
@@ -93,11 +93,11 @@ let ident ppf s =
 
 let variable ppf { txt = s; loc = _ } = ident ppf s
 
-let var_within_closure ppf { txt = s; loc = _ } = ident ppf s
+let value_slot ppf { txt = s; loc = _ } = ident ppf s
 
 let code_id ppf ({ txt = s; loc = _ } : code_id) = ident ppf s
 
-let closure_id ppf ({ txt = s; loc = _ } : closure_id) = ident ppf s
+let function_slot ppf ({ txt = s; loc = _ } : function_slot) = ident ppf s
 
 let continuation_id ppf ({ txt = s; loc = _ } : continuation_id) = ident ppf s
 
@@ -106,7 +106,7 @@ let special_continuation ppf special_cont =
   | Done -> Format.fprintf ppf "done"
   | Error -> Format.fprintf ppf "error"
 
-let continuation ppf cont =
+let continuation ppf (cont : continuation) =
   match cont with
   | Named id -> continuation_id ppf id
   | Special special_cont -> special_continuation ppf special_cont
@@ -118,40 +118,69 @@ let result_continuation ppf rcont =
 
 let exn_continuation ppf c = Format.fprintf ppf "* %a" continuation c
 
-let naked_number_kind ppf (nnk : naked_number_kind) =
+let region ppf (r : region) =
+  match r with
+  | Named v -> variable ppf v
+  | Toplevel -> Format.pp_print_string ppf "toplevel"
+
+let naked_number_kind ppf (nnk : Flambda_kind.Naked_number_kind.t) =
   Format.pp_print_string ppf
   @@
   match nnk with
   | Naked_immediate -> "imm"
+  | Naked_float32 -> "float32"
   | Naked_float -> "float"
   | Naked_int32 -> "int32"
   | Naked_int64 -> "int64"
   | Naked_nativeint -> "nativeint"
+  | Naked_vec128 -> "vec128"
 
-let kind ppf (k : kind) =
-  match k with
-  | Value -> Format.pp_print_string ppf "val"
-  | Naked_number nnk -> naked_number_kind ppf nnk
-  | Fabricated -> Format.pp_print_string ppf "fabricated"
-  | Rec_info -> Format.pp_print_string ppf "rec_info"
-
-let kind_with_subkind ppf (k : kind_with_subkind) =
+let rec subkind ppf (k : subkind) =
   let str s = Format.pp_print_string ppf s in
   match k with
-  | Any_value -> str "val"
-  | Block _ -> str "block" (* CR mshinwell: improve this *)
-  | Float_block _ -> str "float_block"
-  | Naked_number nnk -> naked_number_kind ppf nnk
+  | Anything -> str "val"
+  | Float_block { num_fields } -> Format.fprintf ppf "float ^ %d" num_fields
   | Boxed_float -> str "float boxed"
+  | Boxed_float32 -> str "float32 boxed"
   | Boxed_int32 -> str "int32 boxed"
   | Boxed_int64 -> str "int64 boxed"
   | Boxed_nativeint -> str "nativeint boxed"
+  | Boxed_vec128 -> str "vec128 boxed"
+  | Variant { consts; non_consts } -> variant_subkind ppf consts non_consts
   | Tagged_immediate -> str "imm tagged"
+  | Float_array -> str "float array"
+  | Immediate_array -> str "imm array"
+  | Value_array -> str "val array"
+  | Generic_array -> str "any array"
+
+and variant_subkind ppf consts non_consts =
+  match consts, non_consts with
+  | [], [] ->
+    Format.pp_print_string ppf "[ ]" (* Empty variant? Sure, whatever *)
+  | _, _ ->
+    (* Align first | in line with opening [*)
+    Format.fprintf ppf "@[<hov 0>[ ";
+    pp_pipe_list (fun ppf -> Format.fprintf ppf "%Ld") ppf consts;
+    let () =
+      match consts, non_consts with
+      | [], _ | _, [] -> ()
+      | _ :: _, _ :: _ -> Format.fprintf ppf "@ | "
+    in
+    let pp_pair ppf (tag, sk) =
+      Format.fprintf ppf "@[<hov 2>%d of %a@]" tag
+        (pp_star_list kind_with_subkind)
+        sk
+    in
+    pp_pipe_list pp_pair ppf non_consts;
+    Format.fprintf ppf "@ ]@]"
+
+and kind_with_subkind ppf (k : kind_with_subkind) =
+  let str s = Format.pp_print_string ppf s in
+  match k with
+  | Naked_number nnk -> naked_number_kind ppf nnk
   | Rec_info -> str "rec_info"
-  | Float_array -> str "float_array"
-  | Immediate_array -> str "immediate_array"
-  | Value_array -> str "value_array"
-  | Generic_array -> str "generic_array"
+  | Region -> str "region"
+  | Value sk -> subkind ppf sk
 
 let arity ppf (a : arity) =
   match a with
@@ -180,15 +209,13 @@ let convertible_type ppf (t : standard_int_or_float) =
     match t with
     | Tagged_immediate -> "imm tagged"
     | Naked_immediate -> "imm"
+    | Naked_float32 -> "float32"
     | Naked_float -> "float"
     | Naked_int32 -> "int32"
     | Naked_int64 -> "int64"
     | Naked_nativeint -> "nativeint"
   in
   Format.pp_print_string ppf str
-
-let signed_or_unsigned ~space ppf (s : signed_or_unsigned) =
-  match s with Signed -> () | Unsigned -> pp_spaced ~space ppf "unsigned"
 
 let field_of_block ppf : field_of_block -> unit = function
   | Symbol s -> symbol ppf s
@@ -230,9 +257,12 @@ let const ppf (c : Fexpr.const) =
   | Naked_immediate i -> Format.fprintf ppf "%si" i
   | Tagged_immediate i -> Format.fprintf ppf "%s" i
   | Naked_float f -> float ppf f
+  | Naked_float32 f -> Format.fprintf ppf "%hs" f
   | Naked_int32 i -> Format.fprintf ppf "%lil" i
   | Naked_int64 i -> Format.fprintf ppf "%LiL" i
   | Naked_nativeint i -> Format.fprintf ppf "%Lin" i
+  | Naked_vec128 { high; low } ->
+    Format.fprintf ppf "vec128[%016Lx:%016Lx]" high low
 
 let rec simple ppf : simple -> unit = function
   | Symbol s -> symbol ppf s
@@ -243,10 +273,6 @@ let rec simple ppf : simple -> unit = function
 let simple_args ~space ~omit_if_empty ppf = function
   | [] when omit_if_empty -> ()
   | args -> pp_spaced ~space ppf "(@[<hv>%a@])" (pp_comma_list simple) args
-
-let name ppf : name -> unit = function
-  | Symbol s -> symbol ppf s
-  | Var v -> variable ppf v
 
 let mutability ~space ppf mut =
   let str =
@@ -260,15 +286,55 @@ let mutability ~space ppf mut =
 let array_kind ~space ppf (ak : array_kind) =
   let str =
     match ak with
-    | Immediates -> None
-    | Values -> Some "val"
+    | Values -> None
+    | Immediates -> Some "imm"
     | Naked_floats -> Some "float"
+    | Naked_float32s -> Some "float32"
+    | Naked_int32s -> Some "int32"
+    | Naked_int64s -> Some "int64"
+    | Naked_nativeints -> Some "nativeint"
+    | Naked_vec128s -> Some "vec128"
+    | Unboxed_product _ -> Some "unboxed_product"
   in
   pp_option ~space Format.pp_print_string ppf str
 
+let empty_array_kind ~space ppf (ak : empty_array_kind) =
+  let str =
+    match ak with
+    | Values_or_immediates_or_naked_floats -> None
+    | Naked_float32s -> Some "float32"
+    | Naked_int32s -> Some "int32"
+    | Naked_int64s -> Some "int64"
+    | Naked_nativeints -> Some "nativeint"
+    | Naked_vec128s -> Some "vec128"
+    | Unboxed_products -> Some "unboxed_product"
+  in
+  pp_option ~space Format.pp_print_string ppf str
+
+let array_kind_for_length ~space ppf (ak : array_kind_for_length) =
+  match ak with
+  | Array_kind ak -> array_kind ~space ppf ak
+  | Float_array_opt_dynamic ->
+    pp_option ~space Format.pp_print_string ppf (Some "generic")
+
+let alloc_mode_for_allocations_opt ppf (alloc : alloc_mode_for_allocations)
+    ~space =
+  match alloc with
+  | Heap -> ()
+  | Local { region = r } -> pp_spaced ~space ppf "&%a" region r
+
+let alloc_mode_for_applications_opt ppf (alloc : alloc_mode_for_applications)
+    ~space =
+  match alloc with
+  | Heap -> ()
+  | Local { region = r; ghost_region = r' } ->
+    pp_spaced ~space ppf "&%a &%a" region r region r'
+
 let init_or_assign ppf ia =
-  let str = match ia with Initialization -> "=" | Assignment -> "<-" in
-  Format.fprintf ppf "%s" str
+  match ia with
+  | Initialization -> Format.pp_print_string ppf "="
+  | Assignment Heap -> Format.pp_print_string ppf "<-"
+  | Assignment Local -> Format.pp_print_string ppf "<-&"
 
 let boxed_variable ppf var ~kind =
   Format.fprintf ppf "%a : %s boxed" variable var kind
@@ -283,14 +349,19 @@ let static_data ppf : static_data -> unit = function
       tag
       (pp_comma_list field_of_block)
       elts
+  | Boxed_float32 (Const f) -> Format.fprintf ppf "%hs" f
   | Boxed_float (Const f) -> Format.fprintf ppf "%h" f
   | Boxed_int32 (Const i) -> Format.fprintf ppf "%lil" i
   | Boxed_int64 (Const i) -> Format.fprintf ppf "%LiL" i
   | Boxed_nativeint (Const i) -> Format.fprintf ppf "%Lin" i
+  | Boxed_vec128 (Const { high; low }) ->
+    Format.fprintf ppf "vec128[%016Lx:%016Lx]" high low
   | Boxed_float (Var v) -> boxed_variable ppf v ~kind:"float"
+  | Boxed_float32 (Var v) -> boxed_variable ppf v ~kind:"float32"
   | Boxed_int32 (Var v) -> boxed_variable ppf v ~kind:"int32"
   | Boxed_int64 (Var v) -> boxed_variable ppf v ~kind:"int64"
   | Boxed_nativeint (Var v) -> boxed_variable ppf v ~kind:"nativeint"
+  | Boxed_vec128 (Var v) -> boxed_variable ppf v ~kind:"vec128"
   | Immutable_float_block elements ->
     Format.fprintf ppf "Float_block (%a)"
       (pp_comma_list float_or_variable)
@@ -299,7 +370,12 @@ let static_data ppf : static_data -> unit = function
     Format.fprintf ppf "Float_array [|%a|]"
       (pp_semi_list float_or_variable)
       elements
-  | Empty_array -> Format.fprintf ppf "Empty_array"
+  | Immutable_value_array elements ->
+    Format.fprintf ppf "Value_array [|%a|]"
+      (pp_semi_list field_of_block)
+      elements
+  | Empty_array kind ->
+    Format.fprintf ppf "Empty_array%a" (empty_array_kind ~space:Before) kind
   | Mutable_string { initial_value = s } ->
     Format.fprintf ppf "mutable \"%s\"" (s |> String.escaped)
   | Immutable_string s -> Format.fprintf ppf "\"%s\"" (s |> String.escaped)
@@ -307,9 +383,14 @@ let static_data ppf : static_data -> unit = function
 let static_data_binding ppf { symbol = s; defining_expr = sp } =
   Format.fprintf ppf "%a =@ %a" symbol s static_data sp
 
-let invalid ppf = function
-  | Halt_and_catch_fire -> Format.fprintf ppf "HCF"
-  | Treat_as_unreachable -> Format.fprintf ppf "Unreachable"
+let nullop ppf (o : nullop) =
+  Format.pp_print_string ppf
+  @@
+  match o with
+  | Begin_region { ghost } ->
+    if ghost then "%begin_ghost_region" else "%begin_region"
+  | Begin_try_region { ghost } ->
+    if ghost then "%begin_ghost_try_region" else "%begin_try_region"
 
 let binary_int_arith_op ppf (o : binary_int_arith_op) =
   Format.pp_print_string ppf
@@ -324,136 +405,252 @@ let binary_int_arith_op ppf (o : binary_int_arith_op) =
   | Or -> "lor"
   | Xor -> "lxor"
 
-let int_comp ppf (o : ordered_comparison comparison_behaviour) =
+let signed_or_unsigned ppf (o : infix_binop) ~space =
+  let is_unsigned_comparison (c : signed_or_unsigned comparison) =
+    match c with
+    | Neq | Eq -> false
+    | Lt sou | Gt sou | Le sou | Ge sou -> sou == Unsigned
+  in
+  let is_unsigned_behaviour (o : signed_or_unsigned comparison_behaviour) =
+    match o with
+    | Yielding_bool c -> is_unsigned_comparison c
+    | Yielding_int_like_compare_functions sou -> sou == Unsigned
+  in
+  let is_unsigned =
+    match o with
+    | Int_comp b -> is_unsigned_behaviour b
+    | Int_arith _ | Int_shift _ | Float_arith _ | Float_comp _ -> false
+  in
+  if is_unsigned then pp_spaced ppf ~space "%s" "unsigned"
+
+let int_comp ppf (o : _ comparison_behaviour) =
   Format.pp_print_string ppf
   @@
   match o with
-  | Yielding_bool Lt -> "<"
-  | Yielding_bool Gt -> ">"
-  | Yielding_bool Le -> "<="
-  | Yielding_bool Ge -> ">="
-  | Yielding_int_like_compare_functions -> "?"
+  | Yielding_bool Neq -> "<>"
+  | Yielding_bool Eq -> "="
+  | Yielding_bool (Lt _) -> "<"
+  | Yielding_bool (Gt _) -> ">"
+  | Yielding_bool (Le _) -> "<="
+  | Yielding_bool (Ge _) -> ">="
+  | Yielding_int_like_compare_functions _ -> "?"
 
 let int_shift_op ppf (s : int_shift_op) =
   Format.pp_print_string ppf
   @@ match s with Lsl -> "lsl" | Lsr -> "lsr" | Asr -> "asr"
 
-let binary_float_arith_op ppf (o : binary_float_arith_op) =
-  Format.pp_print_string ppf
-  @@ match o with Add -> "+." | Sub -> "-." | Mul -> "*." | Div -> "/."
-
-let float_comp ppf (o : comparison comparison_behaviour) =
+let binary_float_arith_op ppf (w : float_bitwidth) (o : binary_float_arith_op) =
   Format.pp_print_string ppf
   @@
-  match o with
-  | Yielding_bool Eq -> "=."
-  | Yielding_bool Neq -> "!=."
-  | Yielding_bool Lt -> "<."
-  | Yielding_bool Gt -> ">."
-  | Yielding_bool Le -> "<=."
-  | Yielding_bool Ge -> ">=."
-  | Yielding_int_like_compare_functions -> "?"
+  match w, o with
+  | Float64, Add -> "+."
+  | Float64, Sub -> "-."
+  | Float64, Mul -> "*."
+  | Float64, Div -> "/."
+  | Float32, Add -> "Float32.+."
+  | Float32, Sub -> "Float32.-."
+  | Float32, Mul -> "Float32.*."
+  | Float32, Div -> "Float32./."
+
+let float_comp ppf (w : float_bitwidth) (o : unit comparison_behaviour) =
+  Format.pp_print_string ppf
+  @@
+  match w, o with
+  | Float64, Yielding_bool Eq -> "=."
+  | Float64, Yielding_bool Neq -> "<>."
+  | Float64, Yielding_bool (Lt ()) -> "<."
+  | Float64, Yielding_bool (Gt ()) -> ">."
+  | Float64, Yielding_bool (Le ()) -> "<=."
+  | Float64, Yielding_bool (Ge ()) -> ">=."
+  | Float32, Yielding_bool Eq -> "Float32.=."
+  | Float32, Yielding_bool Neq -> "Float32.<>."
+  | Float32, Yielding_bool (Lt ()) -> "Float32.<."
+  | Float32, Yielding_bool (Gt ()) -> "Float32.>."
+  | Float32, Yielding_bool (Le ()) -> "Float32.<=."
+  | Float32, Yielding_bool (Ge ()) -> "Float32.>=."
+  | (Float64 | Float32), Yielding_int_like_compare_functions () -> "?"
 
 let infix_binop ppf (b : infix_binop) =
   match b with
   | Int_arith o -> binary_int_arith_op ppf o
   | Int_comp c -> int_comp ppf c
   | Int_shift s -> int_shift_op ppf s
-  | Float_arith o -> binary_float_arith_op ppf o
-  | Float_comp c -> float_comp ppf c
+  | Float_arith (w, o) -> binary_float_arith_op ppf w o
+  | Float_comp (w, c) -> float_comp ppf w c
+
+let block_access_kind ppf (access_kind : block_access_kind) =
+  let pp_size ppf (size : Int64.t option) =
+    match size with
+    | None -> ()
+    | Some size -> Format.fprintf ppf "@ size(%Li)" size
+  in
+  let pp_field_kind ppf (field_kind : block_access_field_kind) =
+    match field_kind with
+    | Any_value -> ()
+    | Immediate -> Format.fprintf ppf "@ imm"
+  in
+  match access_kind with
+  | Values { field_kind; tag; size } ->
+    Format.fprintf ppf "%a%a%a" pp_field_kind field_kind
+      (pp_option ~space:Before (pp_like "tag(%a)" Format.pp_print_int))
+      tag pp_size size
+  | Naked_floats { size } -> Format.fprintf ppf "@ float%a" pp_size size
+
+let string_accessor_width ppf saw =
+  Format.fprintf ppf "%s"
+    (match saw with
+    | Eight -> "8"
+    | Sixteen -> "16"
+    | Thirty_two -> "32"
+    | Single -> "f32"
+    | Sixty_four -> "64"
+    | One_twenty_eight { aligned = false } -> "128u"
+    | One_twenty_eight { aligned = true } -> "128a")
+
+let array_load_kind ~space ppf (load_kind : array_load_kind) =
+  let str =
+    match[@ocaml.warning "-fragile-match"] load_kind with
+    | Naked_vec128s -> Some "vec128"
+    | _ -> None
+  in
+  pp_option ~space Format.pp_print_string ppf str
+
+let array_set_kind ~space ppf (set_kind : array_set_kind) =
+  let str =
+    match[@ocaml.warning "-fragile-match"] set_kind with
+    | Naked_vec128s -> Some "vec128"
+    | _ -> None
+  in
+  pp_option ~space Format.pp_print_string ppf str
 
 let binop ppf binop a b =
   match binop with
-  | Array_load (ak, mut) ->
-    Format.fprintf ppf "@[<2>%%array_load%a%a@ %a.(%a)@]"
-      (array_kind ~space:Before) ak (mutability ~space:Before) mut simple a
-      simple b
-  | Block_load (access_kind, mut) ->
-    let pp_size ppf (size : Int64.t option) =
-      match size with
-      | None -> ()
-      | Some size -> Format.fprintf ppf "@ size(%Li)" size
+  | Array_load (ak, width, mut) ->
+    Format.fprintf ppf "@[<2>%%array_load%a%a%a@ %a.(%a)@]"
+      (array_kind ~space:Before) ak (mutability ~space:Before) mut
+      (array_load_kind ~space:Before)
+      width simple a simple b
+  | Block_set { kind; init; field } ->
+    Format.fprintf ppf "@[<2>%%block_set%a@ %a.(%a)@ %a %a@]" block_access_kind
+      kind simple a Targetint_31_63.print field init_or_assign init simple b
+  | String_or_bigstring_load (slv, saw) ->
+    let prim =
+      match slv with
+      | String -> "%string_load"
+      | Bytes -> "%bytes_load"
+      | Bigstring -> "%bigstring_load"
     in
-    let pp_field_kind ppf (field_kind : block_access_field_kind) =
-      match field_kind with
-      | Any_value -> ()
-      | Immediate -> Format.fprintf ppf "@ imm"
-    in
-    let pp_access_kind ppf (access_kind : block_access_kind) =
-      match access_kind with
-      | Values { field_kind; tag; size } ->
-        Format.fprintf ppf "%a%a%a" pp_field_kind field_kind
-          (pp_option ~space:Before (pp_like "tag(%a)" Format.pp_print_int))
-          tag pp_size size
-      | Naked_floats { size } -> Format.fprintf ppf "float%a" pp_size size
-    in
-    Format.fprintf ppf "@[<2>%%block_load%a%a@ (%a,@ %a)@]"
-      (mutability ~space:Before) mut pp_access_kind access_kind simple a simple
-      b
-  | Phys_equal (k, comp) ->
+    Format.fprintf ppf "@[<2>%s@ %a@ (%a,@ %a)@]" prim string_accessor_width saw
+      simple a simple b
+  | Phys_equal comp ->
     let name = match comp with Eq -> "%phys_eq" | Neq -> "%phys_ne" in
-    Format.fprintf ppf "@[<2>%s%a@ (%a,@ %a)@]" name
-      (pp_option ~space:Before kind)
-      k simple a simple b
-  | Infix op -> Format.fprintf ppf "%a %a %a" simple a infix_binop op simple b
+    Format.fprintf ppf "@[<2>%s@ (%a,@ %a)@]" name simple a simple b
+  | Infix op ->
+    Format.fprintf ppf "@[<h>%a%a@ %a@ %a@]"
+      (signed_or_unsigned ~space:After)
+      op simple a infix_binop op simple b
   | Int_arith (i, o) ->
     Format.fprintf ppf "@[<2>%%int_arith %a%a@ %a@ %a@]"
       (standard_int ~space:After)
       i simple a binary_int_arith_op o simple b
-  | Int_comp (i, s, c) ->
-    Format.fprintf ppf "@[<2>%%int_comp %a%a%a@ %a@ %a@]"
+  | Int_comp (i, c) ->
+    Format.fprintf ppf "@[<2>%%int_comp %a%a@ %a@ %a@]"
       (standard_int ~space:After)
-      i
-      (signed_or_unsigned ~space:After)
-      s simple a int_comp c simple b
+      i simple a int_comp c simple b
   | Int_shift (i, s) ->
     Format.fprintf ppf "@[<2>%%int_shift %a%a@ %a@ %a@]"
       (standard_int ~space:After)
       i simple a int_shift_op s simple b
+  | Bigarray_get_alignment align ->
+    Format.fprintf ppf "@[<2>%%bigarray_get_alignment[%d] %a@ %a@]" align simple
+      a simple b
+
+let unary_int_arith_op ppf (o : unary_int_arith_op) =
+  Format.pp_print_string ppf
+  @@ match o with Neg -> "~-" | Swap_byte_endianness -> "bswap"
 
 let unop ppf u =
   let str s = Format.pp_print_string ppf s in
-  let box_or_unbox verb_not_imm verb_imm (bk : box_kind) =
+  let box_or_unbox verb_not_imm (bk : box_kind) =
     let print verb obj = Format.fprintf ppf "%%%s_%s" verb obj in
     match bk with
+    | Naked_float32 -> print verb_not_imm "float32"
     | Naked_float -> print verb_not_imm "float"
     | Naked_int32 -> print verb_not_imm "int32"
     | Naked_int64 -> print verb_not_imm "int64"
     | Naked_nativeint -> print verb_not_imm "nativeint"
-    | Untagged_immediate -> print verb_imm "imm"
+    | Naked_vec128 -> print verb_not_imm "vec128"
   in
-  match u with
-  | Array_length -> str "%array_length"
-  | Box_number bk -> box_or_unbox "Box" "Tag" bk
+  match (u : unop) with
+  | Block_load { kind; mut; field } ->
+    Format.fprintf ppf "@[<2>%%block_load%a%a@ (%a)@]"
+      (mutability ~space:Before) mut block_access_kind kind
+      Targetint_31_63.print field
+  | Array_length ak ->
+    str "%array_length";
+    array_kind_for_length ppf ~space:Before ak
+  | Boolean_not -> str "%not"
+  | Box_number (bk, alloc) ->
+    box_or_unbox "Box" bk;
+    alloc_mode_for_allocations_opt ppf alloc ~space:Before
+  | End_region { ghost } ->
+    str (if ghost then "%end_ghost_region" else "%end_region")
+  | End_try_region { ghost } ->
+    str (if ghost then "%end_ghost_try_region" else "%end_try_region")
   | Get_tag -> str "%get_tag"
+  | Int_arith (i, o) ->
+    Format.fprintf ppf "@[<2>%%int_arith %a%a@]"
+      (standard_int ~space:After)
+      i unary_int_arith_op o
+  | Is_flat_float_array -> str "%is_flat_float_array"
   | Is_int -> str "%is_int"
   | Num_conv { src; dst } ->
     Format.fprintf ppf "@[<2>%%num_conv@ (%a@ -> %a)@]" convertible_type src
       convertible_type dst
   | Opaque_identity -> str "%Opaque"
-  | Project_var { project_from; var } ->
-    Format.fprintf ppf "@[<2>%%project_var@ %a.%a@]" closure_id project_from
-      var_within_closure var
-  | Select_closure { move_from; move_to } ->
-    Format.fprintf ppf "@[<2>%%select_closure@ (%a@ -> %a)@]" closure_id
-      move_from closure_id move_to
+  | Project_value_slot { project_from; value_slot = value_slot' } ->
+    Format.fprintf ppf "@[<2>%%project_value_slot@ %a.%a@]" function_slot
+      project_from value_slot value_slot'
+  | Project_function_slot { move_from; move_to } ->
+    Format.fprintf ppf "@[<2>%%project_function_slot@ (%a@ -> %a)@]"
+      function_slot move_from function_slot move_to
   | String_length Bytes -> str "%bytes_length"
   | String_length String -> str "%string_length"
-  | Unbox_number bk -> box_or_unbox "unbox" "untag" bk
+  | Unbox_number bk -> box_or_unbox "unbox" bk
+  | Untag_immediate -> str "%untag_imm"
+  | Tag_immediate -> str "%Tag_imm"
 
 let ternop ppf t a1 a2 a3 =
   match t with
-  | Array_set (ak, ia) ->
-    Format.fprintf ppf "@[<2>%%array_set%a@ %a.(%a) %a %a@]"
-      (array_kind ~space:Before) ak simple a1 simple a2 init_or_assign ia simple
-      a3
+  | Array_set (ak, set_kind) ->
+    let ia =
+      match set_kind with
+      | Values ia -> ia
+      | Immediates | Naked_floats | Naked_float32s | Naked_int32s | Naked_int64s
+      | Naked_nativeints | Naked_vec128s ->
+        Initialization (* Will be ignored anyway *)
+    in
+    Format.fprintf ppf "@[<2>%%array_set%a%a@ %a.(%a) %a %a@]"
+      (array_kind ~space:Before) ak
+      (array_set_kind ~space:Before)
+      set_kind simple a1 simple a2 init_or_assign ia simple a3
+  | Bytes_or_bigstring_set (blv, saw) ->
+    let prim =
+      match blv with Bytes -> "%bytes_set" | Bigstring -> "%bigstring_set"
+    in
+    Format.fprintf ppf "@[<2>%s@ %a %a.(%a) %a@]" prim string_accessor_width saw
+      simple a1 simple a2 simple a3
 
 let prim ppf = function
+  | Nullary n -> nullop ppf n
   | Unary (u, a) -> Format.fprintf ppf "%a %a" unop u simple a
   | Binary (b, a1, a2) -> binop ppf b a1 a2
   | Ternary (t, a1, a2, a3) -> ternop ppf t a1 a2 a3
-  | Variadic (Make_block (tag, mut), elts) ->
-    Format.fprintf ppf "@[<2>%%Block %a%i%a@]" (mutability ~space:After) mut tag
+  | Variadic (Make_block (tag, mut, alloc), elts) ->
+    Format.fprintf ppf "@[<2>%%Block %a%i%a%a@]" (mutability ~space:After) mut
+      tag
+      (alloc_mode_for_allocations_opt ~space:Before)
+      alloc
       (simple_args ~space:Before ~omit_if_empty:false)
       elts
 
@@ -490,23 +687,22 @@ let apply_cont ppf (ac : Fexpr.apply_cont) =
 
 let switch_case ppf (v, c) = Format.fprintf ppf "@;| %i -> %a" v apply_cont c
 
-let closure_elements ppf = function
+let value_slots ppf = function
   | None -> ()
   | Some ces ->
     Format.fprintf ppf "@ @[<hv2>with {";
     pp_list ~sep:";"
-      (fun ppf ({ var; value } : closure_element) ->
-        Format.fprintf ppf "@ @[<hv2>%a =@ %a@]" var_within_closure var simple
-          value)
+      (fun ppf ({ var; value } : one_value_slot) ->
+        Format.fprintf ppf "@ @[<hv2>%a =@ %a@]" value_slot var simple value)
       ppf ces;
     Format.fprintf ppf "@;<1 -2>}@]"
 
 let fun_decl ppf (decl : fun_decl) =
-  let pp_at_closure_id ppf cid =
-    pp_option ~space:Before (pp_like "@@%a" closure_id) ppf cid
+  let pp_at_function_slot ppf cid =
+    pp_option ~space:Before (pp_like "@@%a" function_slot) ppf cid
   in
   Format.fprintf ppf "@[<2>closure@ %a%a@]" code_id decl.code_id
-    pp_at_closure_id decl.closure_id
+    pp_at_function_slot decl.function_slot
 
 let named ppf = function
   | (Simple s : named) -> simple ppf s
@@ -520,11 +716,14 @@ let static_closure_binding ppf (scb : static_closure_binding) =
 
 let call_kind ~space ppf ck =
   match ck with
-  | Function Indirect -> ()
-  | Function (Direct { code_id = c; closure_id = cl }) ->
-    pp_spaced ~space ppf "@[direct(%a%a)@]" code_id c
-      (pp_option ~space:Before (pp_like "@@%a" closure_id))
+  | Function (Indirect alloc) ->
+    alloc_mode_for_applications_opt ppf alloc ~space
+  | Function (Direct { code_id = c; function_slot = cl; alloc }) ->
+    pp_spaced ~space ppf "@[direct(%a%a%a)@]" code_id c
+      (pp_option ~space:Before (pp_like "@@%a" function_slot))
       cl
+      (alloc_mode_for_applications_opt ~space:Before)
+      alloc
   | C_call { alloc } ->
     let noalloc_kwd = if alloc then None else Some "noalloc" in
     pp_spaced ~space ppf "ccall%a"
@@ -545,7 +744,7 @@ let inline_attribute ~space ppf (i : Inline_attribute.t) =
 let inline_attribute_opt ~space ppf i =
   pp_option ~space (inline_attribute ~space:Neither) ppf i
 
-let inlined_attribute ~space ppf (i : Inlined_attribute.t) =
+let inlined_attribute ~space ppf (i : Fexpr.inlined_attribute) =
   let str =
     match i with
     | Always_inlined -> Some "inlined(always)"
@@ -561,6 +760,19 @@ let inlined_attribute_opt ~space ppf i =
 
 let inlining_state ppf { depth } = Format.fprintf ppf "depth(%d)" depth
 
+let loopify_attribute ppf (loopify : loopify_attribute) =
+  Format.pp_print_string ppf
+  @@
+  match loopify with
+  | Always_loopify -> "loopify(always)"
+  | Never_loopify -> "loopify(never)"
+  | Already_loopified -> "loopify(done)"
+  | Default_loopify_and_tailrec -> "loopify(default tailrec)"
+  | Default_loopify_and_not_tailrec -> "loopify(default)"
+
+let loopify_attribute_opt ~space ppf l =
+  pp_option ~space loopify_attribute ppf l
+
 let code_size ppf code_size = Format.fprintf ppf "%d" code_size
 
 let or_blank f ppf ob =
@@ -568,10 +780,10 @@ let or_blank f ppf ob =
 
 let func_name_with_optional_arities ppf (n, arities) =
   match arities with
-  | None -> name ppf n
+  | None -> simple ppf n
   | Some { params_arity; ret_arity } ->
-    Format.fprintf ppf "@[<2>(%a :@ %a ->@ %a@,)@]" name n (or_blank arity)
-      params_arity arity ret_arity
+    Format.fprintf ppf "@[<1>(%a@ : @[%a ->@ %a@]@,)@]" simple n
+      (or_blank arity) params_arity arity ret_arity
 
 type scope =
   | Outer
@@ -579,12 +791,15 @@ type scope =
   | Continuation_body
 
 let parens ~if_scope_is scope ppf f =
-  if if_scope_is = scope
-  then Format.fprintf ppf "(%t)" (f Outer)
-  else f scope ppf
+  match if_scope_is, scope with
+  | Outer, Outer | Where_body, Where_body | Continuation_body, Continuation_body
+    ->
+    Format.fprintf ppf "(%t)" (f Outer)
+  | (Outer | Where_body | Continuation_body), _ -> f scope ppf
 
 let rec expr scope ppf = function
-  | Invalid inv -> invalid ppf inv
+  | Invalid { message } ->
+    Format.fprintf ppf "@[invalid \"%s\"@]" (message |> String.escaped)
   | Apply_cont ac -> Format.fprintf ppf "@[cont %a@]" apply_cont ac
   | Let let_ ->
     parens ~if_scope_is:Where_body scope ppf (fun scope ppf ->
@@ -596,7 +811,7 @@ let rec expr scope ppf = function
       } ->
     parens ~if_scope_is:Continuation_body scope ppf (fun _scope ppf ->
         Format.fprintf ppf
-          "@[<v 2>%a@ @[<v>@[<v 2>@[where%a@]@[<hv2>@ %a%a%a@] =@ %a@]%a@]@]"
+          "@[<v 2>%a@ @[<v>@[<v 2>@[where%a @]@[<hv 2>%a%a%a@] =@ %a@]%a@]@]"
           (expr Where_body) body (recursive ~space:Before) recu continuation_id
           name
           (pp_option continuation_sort ~space:Before)
@@ -637,7 +852,7 @@ let rec expr scope ppf = function
       args result_continuation ret exn_continuation ek
 
 and let_expr scope ppf : let_ -> unit = function
-  | { bindings = first :: rest; body; closure_elements = ces } ->
+  | { bindings = first :: rest; body; value_slots = ces } ->
     Format.fprintf ppf "@[<v>@[<hv>@[<hv2>let %a =@ %a@]" variable first.var
       named first.defining_expr;
     List.iter
@@ -645,14 +860,13 @@ and let_expr scope ppf : let_ -> unit = function
         Format.fprintf ppf "@ @[<hv2>and %a =@ %a@]" variable var named
           defining_expr)
       rest;
-    Format.fprintf ppf "%a@ in@]@ %a@]" closure_elements ces (expr scope) body
+    Format.fprintf ppf "%a@ in@]@ %a@]" value_slots ces (expr scope) body
   | _ -> failwith "empty let?"
 
 and let_symbol_expr scope ppf = function
-  | { bindings; closure_elements; body } ->
+  | { bindings; value_slots; body } ->
     Format.fprintf ppf "@[<v>@[<hv>@[<hv2>let %a@]@ in@]@ %a@]" symbol_bindings
-      (bindings, closure_elements)
-      (expr scope) body
+      (bindings, value_slots) (expr scope) body
 
 and andk ppf l =
   let cont { name; params; sort; handler } =
@@ -672,7 +886,7 @@ and symbol_bindings ppf (bindings, elements) =
       Format.fprintf ppf "%a%a" pp_and () symbol_binding b;
       first := false)
     bindings;
-  closure_elements ppf elements
+  value_slots ppf elements
 
 and symbol_binding ppf (sb : symbol_binding) =
   match sb with
@@ -701,27 +915,42 @@ and code_binding ppf
        ret_arity;
        params_and_body;
        code_size = cs;
-       is_tupled
+       is_tupled;
+       loopify;
+       result_mode
      } :
       code) =
-  Format.fprintf ppf "@[<hv 2>code@[<h>%a%a@ size(%a)%a%a@]@ @[<hv2>@[<hv 2>%a"
+  Format.fprintf ppf
+    "@[<hv 2>code@[<h>%a%a%a@ size(%a)%a%a@]@ @[<hv2>@[<hv 2>%a"
     (recursive ~space:Before) rec_
     (inline_attribute_opt ~space:Before)
-    inline code_size cs
+    inline
+    (loopify_attribute_opt ~space:Before)
+    loopify code_size cs
     (pp_option ~space:Before (pp_like "newer_version_of(%a)" code_id))
     newer_version_of
-    (fun ppf is_tupled -> if is_tupled then Format.fprintf ppf "tupled@ ")
+    (fun ppf is_tupled -> if is_tupled then Format.fprintf ppf "@ tupled@ ")
     is_tupled code_id id;
-  let { params; closure_var; depth_var; ret_cont; exn_cont; body } =
+  let { params;
+        closure_var;
+        region_var;
+        ghost_region_var;
+        depth_var;
+        ret_cont;
+        exn_cont;
+        body
+      } =
     params_and_body
   in
   Format.fprintf ppf
-    "%a@]@ @[<hov 2>%a@ %a@]@ @[<hv 2>-> %a@ * %a@]%a@]@] =@ %a"
+    "%a@]@ @[<hov 2>%a@ %a@ %a %a@]@ @[<hv 2>-> %a@ * %a@]%a%s@]@] =@ %a"
     (kinded_parameters ~space:Before)
-    params variable closure_var variable depth_var continuation_id ret_cont
-    continuation_id exn_cont
+    params variable closure_var variable region_var variable ghost_region_var
+    variable depth_var continuation_id ret_cont continuation_id exn_cont
     (pp_option ~space:Before (pp_like ": %a" arity))
-    ret_arity (expr Outer) body
+    ret_arity
+    (match result_mode with Heap -> "" | Local -> " local")
+    (expr Outer) body
 
 let flambda_unit ppf ({ body } : flambda_unit) =
   Format.fprintf ppf "@[<v>@[%a@]@ @]" (expr Outer) body

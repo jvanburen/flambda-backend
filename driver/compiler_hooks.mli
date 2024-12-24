@@ -10,9 +10,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-open Misc
-open Compile_common
-
 (* Hooks allow to inspect the IR produced by a pass without altering
    the compilation pipeline.
 
@@ -30,16 +27,14 @@ type _ pass =
   | Parse_tree_intf : Parsetree.signature pass
   | Parse_tree_impl : Parsetree.structure pass
   | Typed_tree_intf : Typedtree.signature pass
-  | Typed_tree_impl : (Typedtree.structure * Typedtree.module_coercion) pass
+  | Typed_tree_impl : Typedtree.implementation pass
   | Raw_lambda : Lambda.program pass
   | Lambda : Lambda.program pass
   | Raw_flambda2 : Flambda2_terms.Flambda_unit.t pass
   | Flambda2 : Flambda2_terms.Flambda_unit.t pass
-  | Raw_flambda1 : Flambda.program pass
-  | Flambda1 : Flambda.program pass
-  | Raw_clambda : Clambda.ulambda pass
-  | Clambda : Clambda.ulambda pass
+  | Reaped_flambda2 : Flambda2_terms.Flambda_unit.t pass
 
+  | Mach_polling : Mach.fundecl pass
   | Mach_combine : Mach.fundecl pass
   | Mach_cse : Mach.fundecl pass
   | Mach_spill : Mach.fundecl pass
@@ -48,8 +43,13 @@ type _ pass =
   | Mach_sel : Mach.fundecl pass
   | Mach_split : Mach.fundecl pass
   | Linear : Linear.fundecl pass
+  | Cfg_combine : Cfg_with_layout.t pass
+  | Cfg_cse : Cfg_with_layout.t pass
   | Cfg : Cfg_with_layout.t pass
   | Cmm : Cmm.phrase list pass
+
+  | Inlining_tree : Flambda2_simplify_shared.Inlining_report.Inlining_tree.t pass
+  | Check_allocations : Zero_alloc_checker.iter_witnesses pass
 
 (* Register a new hook for [pass]. *)
 val register : 'a pass -> ('a -> unit) -> unit

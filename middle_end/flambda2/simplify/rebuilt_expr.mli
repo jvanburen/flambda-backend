@@ -36,12 +36,12 @@ val to_expr : t -> Are_rebuilding_terms.t -> Expr.t
 
 val to_apply_cont : t -> Apply_cont.t option
 
-val is_unreachable : t -> Are_rebuilding_terms.t -> bool
+val can_be_removed_as_invalid : t -> Are_rebuilding_terms.t -> bool
 
-val term_not_rebuilt : unit -> t
+val term_not_rebuilt : t
 
 (** This should only be used by [Expr_builder] to make sure occurrences of
-    closure IDs and closure variables are recorded. *)
+    function slots and value slots are recorded. *)
 val create_let :
   Are_rebuilding_terms.t ->
   Bound_pattern.t ->
@@ -62,10 +62,12 @@ module Function_params_and_body : sig
   val create :
     return_continuation:Continuation.t ->
     exn_continuation:Continuation.t ->
-    Bound_parameter.t list ->
+    Bound_parameters.t ->
     body:rebuilt_expr ->
     free_names_of_body:Name_occurrences.t ->
     my_closure:Variable.t ->
+    my_region:Variable.t ->
+    my_ghost_region:Variable.t ->
     my_depth:Variable.t ->
     t
 
@@ -79,12 +81,28 @@ end
 module Continuation_handler : sig
   type t
 
+  val print :
+    cont:Continuation.t ->
+    recursive:Recursive.t ->
+    Format.formatter ->
+    t ->
+    unit
+
   val create :
     Are_rebuilding_terms.t ->
-    Bound_parameter.t list ->
+    Bound_parameters.t ->
     handler:rebuilt_expr ->
     free_names_of_handler:Name_occurrences.t ->
     is_exn_handler:bool ->
+    is_cold:bool ->
+    t
+
+  val create' :
+    Are_rebuilding_terms.t ->
+    Bound_parameters.t ->
+    handler:rebuilt_expr ->
+    is_exn_handler:bool ->
+    is_cold:bool ->
     t
 end
 
@@ -105,15 +123,23 @@ val create_non_recursive_let_cont' :
   is_applied_with_traps:bool ->
   t
 
+val create_non_recursive_let_cont_without_free_names :
+  Are_rebuilding_terms.t ->
+  Continuation.t ->
+  Continuation_handler.t ->
+  body:t ->
+  t
+
 val create_recursive_let_cont :
   Are_rebuilding_terms.t ->
+  invariant_params:Bound_parameters.t ->
   Continuation_handler.t Continuation.Map.t ->
   body:t ->
   t
 
 val create_switch : Are_rebuilding_terms.t -> Switch_expr.t -> t
 
-val create_invalid : unit -> t
+val create_invalid : Invalid.t -> t
 
 val bind_no_simplification :
   Are_rebuilding_terms.t ->

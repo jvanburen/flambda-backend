@@ -13,44 +13,155 @@
 ;**************************************************************************
 
 (executable
-  (name ocamlobjinfo_byte)
-  (modes byte)
-  (modules ocamlobjinfo_byte)
-  ; See note in the toplevel dune file about this.
-  (flags (:standard -nostdlib -cclib "-L ocaml/runtime" -cclib -lcamlrun))
-  ; For the moment, here and below, we use ocamloptcomp instead of
-  ; ocamlmiddleend, since we're always building the native compiler.
-  ; Fixing this will require having some way of modules being present in
-  ; more than one library.
+  (name objinfo)
+  (modes byte native)
+  (modules objinfo)
   (libraries ocamlcommon ocamlbytecomp ocamloptcomp))
 
-(rule
-  (targets ocamlobjinfo_byte.ml)
-  (action (copy objinfo.ml %{targets})))
+(install
+ (files
+  (objinfo.bc as ocamlobjinfo.byte)
+  (objinfo.exe as ocamlobjinfo.opt))
+ (section bin)
+ (package ocaml))
+
+(executables
+ (names   make_opcodes cvt_emit)
+ (modules make_opcodes cvt_emit))
+
+(ocamllex
+ (modules make_opcodes)
+ (mode    fallback))
+
+(ocamllex
+ (modules cvt_emit)
+ (mode    fallback))
 
 (executable
-  (name ocamlobjinfo_native)
-  (modes native)
-  (flags -nostdlib)
-  (modules ocamlobjinfo_native)
-  (libraries ocamlcommon ocamlbytecomp ocamloptcomp
-    runtime_native))
-
-(rule
-  (targets ocamlobjinfo_native.ml)
-  (action (copy objinfo.ml %{targets})))
+  (name ocamldep)
+  (modes byte native)
+  (modules ocamldep)
+  (libraries ocamlcommon ocamlbytecomp))
 
 (install
   (files
-    (ocamlobjinfo_byte.bc as ocamlobjinfo.byte)
-    (ocamlobjinfo_native.exe as ocamlobjinfo)
-    (ocamlobjinfo_native.exe as ocamlobjinfo.opt)
+    (ocamldep.bc as ocamldep.byte)
+    (ocamldep.exe as ocamldep.opt)
+  )
+  (section bin)
+  (package ocaml))
+
+(rule
+  (target opnames.ml)
+  (deps make_opcodes.exe (universe))
+  (action (system "./make_opcodes.exe -opnames < ../%{env:RUNTIME_DIR=runtime-dir-env-var-not-set}/caml/instruct.h > opnames.ml")))
+
+(library
+  (name opnames)
+  (modes byte)
+  (modules opnames))
+
+(executable
+  (name dumpobj)
+  (modes byte)
+  (modules dumpobj)
+  (libraries ocamlcommon ocamlbytecomp opnames))
+
+(install
+  (files
+    (dumpobj.bc as dumpobj.byte)
+    (dumpobj.exe as dumpobj.opt)
   )
   (section bin)
   (package ocaml))
 
 (executable
-  (name merge_archives)
-  (modes native)
-  (modules merge_archives)
-  (libraries ocamlcommon ocamlbytecomp ocamloptcomp runtime_native))
+  (name cmpbyt)
+  (modes byte)
+  (modules cmpbyt)
+  (libraries ocamlcommon ocamlbytecomp))
+
+(executable
+  (name ocamlmklib)
+  (modes byte native)
+  (modules ocamlmklib)
+  ; FIXME Fix warning 32
+  (flags (:standard -w -32))
+  (libraries ocamlcommon ocamlbytecomp))
+
+(install
+  (files
+    (ocamlmklib.bc as ocamlmklib.byte)
+    (ocamlmklib.exe as ocamlmklib.opt)
+  )
+  (section bin)
+  (package ocaml))
+
+(executable
+  (name ocamlmktop)
+  (modes byte native)
+  (modules ocamlmktop)
+  (libraries ocamlcommon ocamlbytecomp))
+
+(install
+  (files
+    (ocamlmktop.bc as ocamlmktop.byte)
+    (ocamlmktop.exe as ocamlmktop.opt)
+  )
+  (section bin)
+  (package ocaml))
+
+(install
+  (files
+    eventlog_metadata
+  )
+  (section lib)
+  (package ocaml))
+
+(library
+  (name debug_printers)
+  (modes byte)
+  (libraries ocamlcommon)
+  (modules debug_printers))
+
+(rule
+  (target debug_printers)
+  (deps debug_printers.ml %{cmo:debug_printers})
+  (action
+    (with-stdout-to %{target}
+      (progn
+        ; Resorting to Bash instead of the built-in [echo] action because I
+        ; couldn't find a better way to get an absolute path out of Dune
+        (bash "echo load_printer \\\"$(realpath %{cmo:debug_printers})\\\"")
+        (with-stdin-from debug_printers.ml
+          (run awk "{ print \"install_printer Debug_printers.\" $2 }"))))))
+
+; ocamlcp, ocamloptp and ocamlprof are not currently supported.
+
+(executable
+ (name generate_cached_generic_functions)
+ (modes byte native)
+ (modules generate_cached_generic_functions)
+ ; FIXME Fix warnings 27 and 33 and 60
+ (flags
+  (:standard -w -27-33-60-69-70))
+ (libraries ocamlcommon ocamloptcomp unix memtrace))
+
+(install
+ (files generate_cached_generic_functions.exe)
+ (section bin)
+ (package ocaml))
+
+(executable
+ (name merge_archives)
+ (modes native)
+ (modules merge_archives)
+ ; FIXME Fix warning 27
+ (flags
+  (:standard -w -27))
+ (libraries ocamlcommon ocamlbytecomp ocamloptcomp))
+
+(executable
+ (name gen_compiler_libs_installation)
+ (modes native)
+ (modules gen_compiler_libs_installation))

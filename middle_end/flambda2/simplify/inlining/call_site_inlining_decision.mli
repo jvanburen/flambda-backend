@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 open! Flambda.Import
 
 val make_decision :
@@ -23,5 +21,10 @@ val make_decision :
   simplify_expr:Expr.t Simplify_common.expr_simplifier ->
   function_type:Flambda2_types.Function_type.t ->
   apply:Apply.t ->
-  return_arity:Flambda_arity.With_subkinds.t ->
+  return_arity:[`Unarized] Flambda_arity.t ->
   Call_site_inlining_decision_type.t
+
+val get_rec_info :
+  Downwards_acc.t ->
+  function_type:Flambda2_types.Function_type.t ->
+  Rec_info_expr.t

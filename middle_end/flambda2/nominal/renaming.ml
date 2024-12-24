@@ -14,18 +14,13 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42-55"]
-
-(* CR mshinwell: Disabling warning 55 is required to satisfy Closure, work out
-   something better... *)
-
 module Continuations = Permutation.Make [@inlined hint] (Continuation)
 module Variables = Permutation.Make [@inlined hint] (Variable)
 module Code_ids = Permutation.Make [@inlined hint] (Code_id)
 module Symbols = Permutation.Make [@inlined hint] (Symbol)
-module Coercion = Reg_width_things.Coercion
-module Const = Reg_width_things.Const
-module Simple = Reg_width_things.Simple
+module Coercion = Int_ids.Coercion
+module Const = Reg_width_const
+module Simple = Int_ids.Simple
 
 module Import_map : sig
   type t
@@ -37,11 +32,9 @@ module Import_map : sig
     consts:Const.t Const.Map.t ->
     code_ids:Code_id.t Code_id.Map.t ->
     continuations:Continuation.t Continuation.Map.t ->
-    used_closure_vars:Var_within_closure.Set.t ->
+    used_value_slots:Value_slot.Set.t ->
     original_compilation_unit:Compilation_unit.t ->
     t
-
-  val is_empty : t -> bool
 
   val const : t -> Const.t -> Const.t
 
@@ -55,7 +48,7 @@ module Import_map : sig
 
   val continuation : t -> Continuation.t -> Continuation.t
 
-  val closure_var_is_used : t -> Var_within_closure.t -> bool
+  val value_slot_is_used : t -> Value_slot.t -> bool
 end = struct
   type t =
     { symbols : Symbol.t Symbol.Map.t;
@@ -64,10 +57,10 @@ end = struct
       consts : Const.t Const.Map.t;
       code_ids : Code_id.t Code_id.Map.t;
       continuations : Continuation.t Continuation.Map.t;
-      used_closure_vars : Var_within_closure.Set.t;
-      (* CR vlaviron: [used_closure_vars] is here because we need to rewrite the
-         types to remove occurrences of unused closure variables, as otherwise
-         the types can contain references to code that is neither exported nor
+      used_value_slots : Value_slot.Set.t;
+      (* CR vlaviron: [used_value_slots] is here because we need to rewrite the
+         types to remove occurrences of unused value slots, as otherwise the
+         types can contain references to code that is neither exported nor
          present in the actual object file. But this means rewriting types, and
          the only place a rewriting traversal is done at the moment is during
          import. This solution is not ideal because the missing code IDs will
@@ -75,78 +68,51 @@ end = struct
          [Flambda_cmx.compute_reachable_names_and_code] we have to assume that
          code IDs can be missing (and so we cannot detect code IDs that are
          really missing at this point). *)
+      (* CR lmaurer: We should consider storing the _unused_ value slots rather
+         than the used ones. This is the only place in this file where a bigger
+         set means _fewer_ changes, and it means we can never know when an
+         import map will have no effect (see PR #1398). *)
       original_compilation_unit : Compilation_unit.t
-          (* This complements [used_closure_vars]. Removal of closure variables
-             is only allowed for variables that are not used in the compilation
-             unit they are defined in. *)
+          (* This complements [used_value_slots]. Removal of value slots is only
+             allowed for variables that are not used in the compilation unit
+             they are defined in. *)
     }
 
-  let is_empty
-      { symbols;
-        variables;
-        simples;
-        consts;
-        code_ids;
-        continuations;
-        used_closure_vars;
-        original_compilation_unit = _
-      } =
-    Symbol.Map.is_empty symbols
-    && Variable.Map.is_empty variables
-    && Simple.Map.is_empty simples
-    && Const.Map.is_empty consts
-    && Code_id.Map.is_empty code_ids
-    && Continuation.Map.is_empty continuations
-    && Var_within_closure.Set.is_empty used_closure_vars
-
   let create ~symbols ~variables ~simples ~consts ~code_ids ~continuations
-      ~used_closure_vars ~original_compilation_unit =
+      ~used_value_slots ~original_compilation_unit =
     { symbols;
       variables;
       simples;
       consts;
       code_ids;
       continuations;
-      used_closure_vars;
+      used_value_slots;
       original_compilation_unit
     }
 
-  let symbol t orig =
-    match Symbol.Map.find orig t.symbols with
-    | symbol -> symbol
-    | exception Not_found -> orig
+  let rename map orig ~find =
+    match find orig map with a -> a | exception Not_found -> orig
 
-  let variable t orig =
-    match Variable.Map.find orig t.variables with
-    | variable -> variable
-    | exception Not_found -> orig
+  let symbol t orig = rename t.symbols orig ~find:Symbol.Map.find
 
-  let const t orig =
-    match Const.Map.find orig t.consts with
-    | const -> const
-    | exception Not_found -> orig
+  let variable t orig = rename t.variables orig ~find:Variable.Map.find
 
-  let code_id t orig =
-    match Code_id.Map.find orig t.code_ids with
-    | code_id -> code_id
-    | exception Not_found -> orig
+  let const t orig = rename t.consts orig ~find:Const.Map.find
+
+  let code_id t orig = rename t.code_ids orig ~find:Code_id.Map.find
 
   let continuation t orig =
-    match Continuation.Map.find orig t.continuations with
-    | continuation -> continuation
-    | exception Not_found -> orig
+    rename t.continuations orig ~find:Continuation.Map.find
 
   let simple t simple =
     (* [t.simples] only holds those [Simple]s with [Coercion] (analogously to
        the grand table of [Simple]s, see reg_width_things.ml). *)
-    match Simple.Map.find simple t.simples with
-    | simple -> simple
-    | exception Not_found -> simple
+    rename t.simples simple ~find:Simple.Map.find
 
-  let closure_var_is_used t var =
-    if Var_within_closure.in_compilation_unit var t.original_compilation_unit
-    then Var_within_closure.Set.mem var t.used_closure_vars
-    else (* This closure variable might be used in other units *)
+  let value_slot_is_used t var =
+    if Value_slot.in_compilation_unit var t.original_compilation_unit
+    then Value_slot.Set.mem var t.used_value_slots
+    else (* This value slot might be used in other units *)
       true
 end
 
@@ -167,14 +133,17 @@ let empty =
   }
 
 let create_import_map ~symbols ~variables ~simples ~consts ~code_ids
-    ~continuations ~used_closure_vars ~original_compilation_unit =
+    ~continuations ~used_value_slots ~original_compilation_unit =
   let import_map =
     Import_map.create ~symbols ~variables ~simples ~consts ~code_ids
-      ~continuations ~used_closure_vars ~original_compilation_unit
+      ~continuations ~used_value_slots ~original_compilation_unit
   in
-  if Import_map.is_empty import_map
-  then empty
-  else { empty with import_map = Some import_map }
+  (* It's tempting to set [import_map] to [None] if everything is empty, but
+     this is incorrect: an import map of [None] is equivalent to having _all_
+     value slots used, not none (see [value_slot_is_used]). *)
+  { empty with import_map = Some import_map }
+
+let has_import_map t = Option.is_some t.import_map
 
 let [@ocamlformat "disable"] print ppf
       { continuations; variables; code_ids; symbols; import_map = _; } =
@@ -189,14 +158,18 @@ let [@ocamlformat "disable"] print ppf
     Code_ids.print code_ids
     Symbols.print symbols
 
-let is_empty { continuations; variables; code_ids; symbols; import_map } =
+let is_identity { continuations; variables; code_ids; symbols; import_map } =
   Continuations.is_empty continuations
   && Variables.is_empty variables
   && Code_ids.is_empty code_ids && Symbols.is_empty symbols
   &&
   match import_map with
   | None -> true
-  | Some import_map -> Import_map.is_empty import_map
+  | Some _ ->
+    (* If there is any import map at all, then this renaming is not necessarily
+       the identity: any value slots _not_ present in [used_value_slots] will be
+       removed from closures. *)
+    false
 
 let compose0
     ~second:
@@ -233,9 +206,9 @@ let compose0
   }
 
 let compose ~second ~first =
-  if is_empty second
+  if is_identity second
   then first
-  else if is_empty first
+  else if is_identity first
   then second
   else compose0 ~second ~first
 
@@ -350,7 +323,7 @@ let apply_simple t simple =
       assert (not (Simple.has_coercion simple));
       Simple.const (apply_const t cst))
 
-let closure_var_is_used t closure_var =
+let value_slot_is_used t value_slot =
   match t.import_map with
   | None -> true (* N.B. not false! *)
-  | Some import_map -> Import_map.closure_var_is_used import_map closure_var
+  | Some import_map -> Import_map.value_slot_is_used import_map value_slot

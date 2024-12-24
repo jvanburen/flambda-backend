@@ -136,9 +136,17 @@ let rec rename i sub =
           let newr = Reg.clone i.res.(0) in
           let (new_next, sub_next) =
             rename i.next (Some(Reg.Map.add oldr newr s)) in
-          (instr_cons i.desc i.arg [|newr|] new_next,
+          (instr_cons_debug i.desc i.arg [|newr|] i.dbg new_next,
            sub_next)
       end
+  | Iop (Iname_for_debugger {
+        ident; which_parameter; provenance; is_assignment; regs }) ->
+      let (new_next, sub_next) = rename i.next sub in
+      let regs = subst_regs regs sub in
+      (instr_cons_debug (Iop (Iname_for_debugger {
+          ident; which_parameter; provenance; is_assignment; regs }))
+         [| |] [||] i.dbg new_next,
+       sub_next)
   | Iop _ ->
       let (new_next, sub_next) = rename i.next sub in
       (instr_cons_debug i.desc (subst_regs i.arg sub) (subst_regs i.res sub)
@@ -149,27 +157,28 @@ let rec rename i sub =
       let (new_ifnot, sub_ifnot) = rename ifnot sub in
       let (new_next, sub_next) =
         rename i.next (merge_substs sub_ifso sub_ifnot i.next) in
-      (instr_cons (Iifthenelse(tst, new_ifso, new_ifnot))
-                  (subst_regs i.arg sub) [||] new_next,
+      (instr_cons_debug (Iifthenelse(tst, new_ifso, new_ifnot))
+                  (subst_regs i.arg sub) [||] i.dbg new_next,
        sub_next)
   | Iswitch(index, cases) ->
       let new_sub_cases = Array.map (fun c -> rename c sub) cases in
       let sub_merge =
         merge_subst_array (Array.map (fun (_n, s) -> s) new_sub_cases) i.next in
       let (new_next, sub_next) = rename i.next sub_merge in
-      (instr_cons (Iswitch(index, Array.map (fun (n, _s) -> n) new_sub_cases))
-                  (subst_regs i.arg sub) [||] new_next,
+      (instr_cons_debug
+        (Iswitch(index, Array.map (fun (n, _s) -> n) new_sub_cases))
+        (subst_regs i.arg sub) [||] i.dbg new_next,
        sub_next)
   | Icatch(rec_flag, ts, handlers, body) ->
       let new_subst =
-        List.map (fun (nfail, _, _) -> nfail, ref None) handlers
+        List.map (fun (nfail, _, _, _) -> nfail, ref None) handlers
       in
       let previous_exit_subst = !exit_subst in
       exit_subst := new_subst @ !exit_subst;
       let (new_body, sub_body) = rename body sub in
       let res =
         List.map2
-          (fun (_, _, handler) (_, new_subst) -> rename handler !new_subst)
+          (fun (_, _, handler, _) (_, new_subst) -> rename handler !new_subst)
           handlers new_subst
       in
       exit_subst := previous_exit_subst;
@@ -178,10 +187,11 @@ let rec rename i sub =
             merge_substs acc sub_handler i.next)
           sub_body res in
       let (new_next, sub_next) = rename i.next merged_subst in
-      let new_handlers = List.map2 (fun (nfail, ts, _) (handler, _) ->
-          (nfail, ts, handler)) handlers res in
-      (instr_cons
-         (Icatch(rec_flag, ts, new_handlers, new_body)) [||] [||] new_next,
+      let new_handlers = List.map2 (fun (nfail, ts, _, is_cold) (handler, _) ->
+          (nfail, ts, handler, is_cold)) handlers res in
+      (instr_cons_debug
+         (Icatch(rec_flag, ts, new_handlers, new_body)) [||] [||]
+         i.dbg new_next,
        sub_next)
   | Iexit (nfail, _traps) ->
       let r = find_exit_subst nfail in
@@ -192,8 +202,8 @@ let rec rename i sub =
       let (new_handler, sub_handler) = rename handler sub in
       let (new_next, sub_next) =
         rename i.next (merge_substs sub_body sub_handler i.next) in
-      (instr_cons (Itrywith(new_body, kind, (ts, new_handler)))
-         [||] [||] new_next,
+      (instr_cons_debug (Itrywith(new_body, kind, (ts, new_handler)))
+         [||] [||] i.dbg new_next,
        sub_next)
   | Iraise k ->
       (instr_cons_debug (Iraise k) (subst_regs i.arg sub) [||] i.dbg i.next,
@@ -222,6 +232,7 @@ let fundecl f =
     fun_args = new_args;
     fun_body = new_body;
     fun_codegen_options = f.fun_codegen_options;
+    fun_poll = f.fun_poll;
     fun_dbg  = f.fun_dbg;
     fun_num_stack_slots = f.fun_num_stack_slots;
     fun_contains_calls = f.fun_contains_calls;

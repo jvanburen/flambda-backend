@@ -1,11 +1,9 @@
 open Flambda2_bound_identifiers
-open Flambda2_cmx
 open Flambda2_identifiers
 open Flambda2_kinds
 open Flambda2_nominal
 open Flambda2_numbers
 open Flambda2_term_basics
-open Flambda2_types
 module K = Flambda_kind
 module T = Flambda2_types
 module TE = T.Typing_env
@@ -20,23 +18,24 @@ let test_meet_chains_two_vars () =
   let env = create_env () in
   let var1 = Variable.create "var1" in
   let var1' = Bound_var.create var1 Name_mode.normal in
-  let env = TE.add_definition env (Bound_name.var var1') K.value in
+  let env = TE.add_definition env (Bound_name.create_var var1') K.value in
   let env =
     TE.add_equation env (Name.var var1)
-      (T.immutable_block ~is_unique:false Tag.zero ~field_kind:K.value
+      (T.immutable_block ~is_unique:false Tag.zero
+         ~shape:(K.Block_shape.Scannable Value_only) Alloc_mode.For_types.heap
          ~fields:[T.any_tagged_immediate])
   in
   let var2 = Variable.create "var2" in
   let var2' = Bound_var.create var2 Name_mode.normal in
-  let env = TE.add_definition env (Bound_name.var var2') K.value in
+  let env = TE.add_definition env (Bound_name.create_var var2') K.value in
   let first_type_for_var2 = T.alias_type_of K.value (Simple.var var1) in
   let env = TE.add_equation env (Name.var var2) first_type_for_var2 in
   let symbol =
     Symbol.create
       (Compilation_unit.get_current_exn ())
-      (Linkage_name.create "my_symbol")
+      (Linkage_name.of_string "my_symbol")
   in
-  let env = TE.add_definition env (Bound_name.symbol symbol) K.value in
+  let env = TE.add_definition env (Bound_name.create_symbol symbol) K.value in
   Format.eprintf "Initial situation:@ %a\n%!" TE.print env;
   let new_type_for_var2 = T.alias_type_of K.value (Simple.symbol symbol) in
   Format.eprintf "New knowledge:@ %a : %a\n%!" Variable.print var2 T.print
@@ -53,28 +52,29 @@ let test_meet_chains_three_vars () =
   let env = create_env () in
   let var1 = Variable.create "var1" in
   let var1' = Bound_var.create var1 Name_mode.normal in
-  let env = TE.add_definition env (Bound_name.var var1') K.value in
+  let env = TE.add_definition env (Bound_name.create_var var1') K.value in
   let env =
     TE.add_equation env (Name.var var1)
-      (T.immutable_block ~is_unique:false Tag.zero ~field_kind:K.value
+      (T.immutable_block ~is_unique:false Tag.zero
+         ~shape:(K.Block_shape.Scannable Value_only) Alloc_mode.For_types.heap
          ~fields:[T.any_tagged_immediate])
   in
   let var2 = Variable.create "var2" in
   let var2' = Bound_var.create var2 Name_mode.normal in
-  let env = TE.add_definition env (Bound_name.var var2') K.value in
+  let env = TE.add_definition env (Bound_name.create_var var2') K.value in
   let first_type_for_var2 = T.alias_type_of K.value (Simple.var var1) in
   let env = TE.add_equation env (Name.var var2) first_type_for_var2 in
   let var3 = Variable.create "var3" in
   let var3' = Bound_var.create var3 Name_mode.normal in
-  let env = TE.add_definition env (Bound_name.var var3') K.value in
+  let env = TE.add_definition env (Bound_name.create_var var3') K.value in
   let first_type_for_var3 = T.alias_type_of K.value (Simple.var var2) in
   let env = TE.add_equation env (Name.var var3) first_type_for_var3 in
   let symbol =
     Symbol.create
       (Compilation_unit.get_current_exn ())
-      (Linkage_name.create "my_symbol")
+      (Linkage_name.of_string "my_symbol")
   in
-  let env = TE.add_definition env (Bound_name.symbol symbol) K.value in
+  let env = TE.add_definition env (Bound_name.create_symbol symbol) K.value in
   Format.eprintf "Initial situation:@ %a\n%!" TE.print env;
   let new_type_for_var3 = T.alias_type_of K.value (Simple.symbol symbol) in
   Format.eprintf "New knowledge:@ %a : %a\n%!" Variable.print var3 T.print
@@ -91,7 +91,7 @@ let meet_variants_don't_lose_aliases () =
   let env = create_env () in
   let define env v =
     let v' = Bound_var.create v Name_mode.normal in
-    TE.add_definition env (Bound_name.var v') K.value
+    TE.add_definition env (Bound_name.create_var v') K.value
   in
   let defines env l = List.fold_left define env l in
   let vx = Variable.create "x" in
@@ -100,25 +100,30 @@ let meet_variants_don't_lose_aliases () =
   let vb = Variable.create "b" in
   let v_variant = Variable.create "variant" in
   let env = defines env [vx; vy; va; vb; v_variant] in
-
   let const_ctors = T.bottom K.naked_immediate in
   let ty1 =
     let non_const_ctors =
       Tag.Scannable.Map.of_list
-        [ Tag.Scannable.create_exn 0, [T.alias_type_of K.value (Simple.var vx)];
-          Tag.Scannable.create_exn 1, [T.alias_type_of K.value (Simple.var vy)]
-        ]
+        [ ( Tag.Scannable.create_exn 0,
+            ( K.Block_shape.Scannable Value_only,
+              [T.alias_type_of K.value (Simple.var vx)] ) );
+          ( Tag.Scannable.create_exn 1,
+            ( K.Block_shape.Scannable Value_only,
+              [T.alias_type_of K.value (Simple.var vy)] ) ) ]
     in
-    T.variant ~const_ctors ~non_const_ctors
+    T.variant ~const_ctors ~non_const_ctors Alloc_mode.For_types.heap
   in
   let ty2 =
     let non_const_ctors =
       Tag.Scannable.Map.of_list
-        [ Tag.Scannable.create_exn 0, [T.alias_type_of K.value (Simple.var va)];
-          Tag.Scannable.create_exn 1, [T.alias_type_of K.value (Simple.var vb)]
-        ]
+        [ ( Tag.Scannable.create_exn 0,
+            ( K.Block_shape.Scannable Value_only,
+              [T.alias_type_of K.value (Simple.var va)] ) );
+          ( Tag.Scannable.create_exn 1,
+            ( K.Block_shape.Scannable Value_only,
+              [T.alias_type_of K.value (Simple.var vb)] ) ) ]
     in
-    T.variant ~const_ctors ~non_const_ctors
+    T.variant ~const_ctors ~non_const_ctors Alloc_mode.For_types.heap
   in
   match T.meet env ty1 ty2 with
   | Bottom -> assert false
@@ -140,7 +145,7 @@ let meet_variants_don't_lose_aliases () =
 let test_meet_two_blocks () =
   let define env v =
     let v' = Bound_var.create v Name_mode.normal in
-    TE.add_definition env (Bound_name.var v') K.value
+    TE.add_definition env (Bound_name.create_var v') K.value
   in
   let defines env l = List.fold_left define env l in
   let env = create_env () in
@@ -149,18 +154,18 @@ let test_meet_two_blocks () =
   let block2 = Variable.create "block2" in
   let field2 = Variable.create "field2" in
   let env = defines env [block1; block2; field1; field2] in
-
   let env =
     TE.add_equation env (Name.var block1)
-      (T.immutable_block ~is_unique:false Tag.zero ~field_kind:K.value
+      (T.immutable_block ~is_unique:false Tag.zero
+         ~shape:(K.Block_shape.Scannable Value_only) Alloc_mode.For_types.heap
          ~fields:[T.alias_type_of K.value (Simple.var field1)])
   in
   let env =
     TE.add_equation env (Name.var block2)
-      (T.immutable_block ~is_unique:false Tag.zero ~field_kind:K.value
+      (T.immutable_block ~is_unique:false Tag.zero
+         ~shape:(K.Block_shape.Scannable Value_only) Alloc_mode.For_types.heap
          ~fields:[T.alias_type_of K.value (Simple.var field2)])
   in
-
   (* let test b1 b2 env =
    *   let eq_block2 = T.alias_type_of K.value (Simple.var b2) in
    *   let env =
@@ -187,12 +192,8 @@ let test_meet_two_blocks () =
   f block2 block1
 
 let () =
-  let comp_unit =
-    Compilation_unit.create
-      (Ident.create_persistent "Meet_test")
-      (Linkage_name.create "meet_test")
-  in
-  Compilation_unit.set_current comp_unit;
+  let comp_unit = "Meet_test" |> Compilation_unit.of_string in
+  Compilation_unit.set_current (Some comp_unit);
   Format.eprintf "MEET CHAINS WITH TWO VARS@\n@.";
   test_meet_chains_two_vars ();
   Format.eprintf "@.MEET CHAINS WITH THREE VARS@\n@.";

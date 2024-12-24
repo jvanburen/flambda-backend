@@ -22,7 +22,7 @@
     value directly but very common to fold over the list to produce an
     environment that is a true Map. They also preserve the order of the
     elements, which is necessary for performing comparisons up to renaming of
-    closure ids and code ids.
+    function slots and code ids.
 
     Several operations on Map are provided here for consistency, but they do not
     necessarily provide the same checks that a Map would and in most cases the
@@ -65,6 +65,12 @@ module type S = sig
   val iter : (key -> 'a -> unit) -> 'a t -> unit
 
   val fold : (key -> 'a -> 'b -> 'b) -> 'a t -> 'b -> 'b
+
+  (** Simultaneously map over the elements and accumulate a value. The
+      arguments are ordered so as to make the order preservation as explicit as
+      possible (the accumulator is produced from the values _before_ the key
+      and value being passed). *)
+  val fold_left_map : ('a -> key -> 'b -> 'a * 'c) -> 'a -> 'b t -> 'a * 'c t
 
   val filter : (key -> 'a -> bool) -> 'a t -> 'a t
 

@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 (** A piece of code, comprising of the parameters and body of a function,
     together with a field indicating whether the piece of code is a newer
     version of one that existed previously (and may still exist), for example
@@ -24,57 +22,20 @@ type t = Flambda.Function_params_and_body.t Code0.t
 
 val code_metadata : t -> Code_metadata.t
 
-val code_id : t -> Code_id.t
-
 val params_and_body : t -> Flambda.Function_params_and_body.t
 
-val newer_version_of : t -> Code_id.t option
+include Code_metadata.Code_metadata_accessors_result_type with type 'a t := t
 
-val params_arity : t -> Flambda_arity.With_subkinds.t
-
-val result_arity : t -> Flambda_arity.With_subkinds.t
-
-val result_types : t -> Result_types.t
-
-val stub : t -> bool
-
-val inline : t -> Inline_attribute.t
-
-val is_a_functor : t -> bool
-
-val recursive : t -> Recursive.t
-
-val cost_metrics : t -> Cost_metrics.t
-
-val inlining_arguments : t -> Inlining_arguments.t
-
-val dbg : t -> Debuginfo.t
-
-val is_tupled : t -> bool
-
-val is_my_closure_used : t -> bool
-
-val inlining_decision : t -> Function_decl_inlining_decision_type.t
-
-val create :
-  Code_id.t ->
+val create_with_metadata :
   params_and_body:Flambda.Function_params_and_body.t ->
   free_names_of_params_and_body:Name_occurrences.t ->
-  newer_version_of:Code_id.t option ->
-  params_arity:Flambda_arity.With_subkinds.t ->
-  result_arity:Flambda_arity.With_subkinds.t ->
-  result_types:Result_types.t ->
-  stub:bool ->
-  inline:Inline_attribute.t ->
-  is_a_functor:bool ->
-  recursive:Recursive.t ->
-  cost_metrics:Cost_metrics.t ->
-  inlining_arguments:Inlining_arguments.t ->
-  dbg:Debuginfo.t ->
-  is_tupled:bool ->
-  is_my_closure_used:bool ->
-  inlining_decision:Function_decl_inlining_decision_type.t ->
+  code_metadata:Code_metadata.t ->
   t
+
+val create :
+  params_and_body:Flambda.Function_params_and_body.t ->
+  free_names_of_params_and_body:Name_occurrences.t ->
+  t Code_metadata.create_type
 
 val with_code_id : Code_id.t -> t -> t
 
@@ -91,6 +52,8 @@ val print : Format.formatter -> t -> unit
 
 include Contains_names.S with type t := t
 
-val all_ids_for_export : t -> Ids_for_export.t
+val ids_for_export : t -> Ids_for_export.t
 
 val map_result_types : t -> f:(Flambda2_types.t -> Flambda2_types.t) -> t
+
+val free_names_of_params_and_body : t -> Name_occurrences.t

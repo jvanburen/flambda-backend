@@ -14,9 +14,11 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-(* CR mshinwell: enable warning 4 *)
+(* CR mshinwell: enable warning fragile-match *)
 
+[@@@ocaml.warning "-fragile-match"]
+
+module Float32 = Numeric_types.Float32_by_bit_pattern
 module Float = Numeric_types.Float_by_bit_pattern
 module Int32 = Numeric_types.Int32
 module Int64 = Numeric_types.Int64
@@ -29,176 +31,96 @@ let is_bottom = Expand_head.is_bottom
 let expand_head env ty =
   Expand_head.expand_head env ty |> Expand_head.Expanded_type.descr_oub
 
-type 'a proof =
+let wrong_kind kind_string t =
+  Misc.fatal_errorf "Kind error: expected [%s]:@ %a" kind_string TG.print t
+
+type 'a meet_shortcut =
+  | Known_result of 'a
+  | Need_meet
+  | Invalid
+
+type 'a proof_of_property =
+  | Proved of 'a
+  | Unknown
+
+type 'a generic_proof =
   | Proved of 'a
   | Unknown
   | Invalid
 
-type 'a proof_allowing_kind_mismatch =
-  | Proved of 'a
-  | Unknown
-  | Invalid
-  | Wrong_kind
+let as_meet_shortcut (p : _ generic_proof) : _ meet_shortcut =
+  match p with
+  | Proved x -> Known_result x
+  | Unknown -> Need_meet
+  | Invalid -> Invalid
 
-type var_or_symbol_or_tagged_immediate =
-  | Var of Variable.t
-  | Symbol of Symbol.t
-  | Tagged_immediate of Targetint_31_63.t
+let as_property (p : _ generic_proof) : _ proof_of_property =
+  match p with Proved x -> Proved x | Unknown | Invalid -> Unknown
 
-let prove_equals_to_var_or_symbol_or_tagged_immediate env t :
-    (var_or_symbol_or_tagged_immediate * Coercion.t) proof =
-  let original_kind = TG.kind t in
-  if not (K.equal original_kind K.value)
-  then Misc.fatal_errorf "Type %a is not of kind value" TG.print t;
-  (* XXX This probably shouldn't be using [get_alias] *)
-  (* XXX This needs to match the equal-to-tagged-immediates function below *)
-  match TG.get_alias_exn t with
-  | exception Not_found -> Unknown
-  | simple ->
-    Simple.pattern_match simple
-      ~const:(fun cst : _ proof ->
-        match Reg_width_const.descr cst with
-        | Tagged_immediate imm -> Proved (Tagged_immediate imm, Coercion.id)
-        | _ ->
-          Misc.fatal_errorf
-            "[Simple] %a in the [Equals] field has a kind different from that \
-             returned by [kind] (%a):@ %a"
-            Simple.print simple K.print original_kind TG.print t)
-      ~name:(fun _ ~coercion:_ : _ proof ->
-        match
-          TE.get_canonical_simple_exn env simple ~min_name_mode:Name_mode.normal
-        with
-        | exception Not_found -> Unknown
-        | simple ->
-          (* CR mshinwell: Instead, get all aliases and find a Symbol, to avoid
-             relying on the fact that if there is a Symbol alias then it will be
-             canonical *)
-          Simple.pattern_match simple
-            ~const:(fun cst : _ proof ->
-              match Reg_width_const.descr cst with
-              | Tagged_immediate imm ->
-                Proved (Tagged_immediate imm, Coercion.id)
-              | _ ->
-                let kind = TG.kind t in
-                Misc.fatal_errorf
-                  "Kind returned by [get_canonical_simple] (%a) doesn't match \
-                   the kind of the returned [Simple] %a:@ %a"
-                  K.print kind Simple.print simple TG.print t)
-            ~name:(fun name ~coercion ->
-              Name.pattern_match name
-                ~var:
-                  (fun var :
-                       (var_or_symbol_or_tagged_immediate * Coercion.t) proof ->
-                  Proved (Var var, coercion))
-                ~symbol:
-                  (fun symbol :
-                       (var_or_symbol_or_tagged_immediate * Coercion.t) proof ->
-                  Proved (Symbol symbol, coercion))))
-
-let prove_single_closures_entry' env t : _ proof_allowing_kind_mismatch =
+let gen_value_to_gen prove_gen env t : _ generic_proof =
   match expand_head env t with
-  | Value (Ok (Closures closures)) -> begin
-    match TG.Row_like_for_closures.get_singleton closures.by_closure_id with
-    | None -> Unknown
-    | Some ((closure_id, set_of_closures_contents), closures_entry) -> (
-      let closure_ids =
-        Set_of_closures_contents.closures set_of_closures_contents
-      in
-      assert (Closure_id.Set.mem closure_id closure_ids);
-      let function_type =
-        TG.Closures_entry.find_function_type closures_entry closure_id
-      in
-      match function_type with
-      | Bottom -> Invalid
-      | Unknown -> Unknown
-      | Ok function_type -> Proved (closure_id, closures_entry, function_type))
-  end
-  | Value (Ok _) -> Invalid
   | Value Unknown -> Unknown
   | Value Bottom -> Invalid
-  | Naked_immediate _ -> Wrong_kind
-  | Naked_float _ -> Wrong_kind
-  | Naked_int32 _ -> Wrong_kind
-  | Naked_int64 _ -> Wrong_kind
-  | Naked_nativeint _ -> Wrong_kind
-  | Rec_info _ -> Wrong_kind
+  | Value (Ok { is_null = Maybe_null; non_null = _ })
+  | Value (Ok { is_null = Not_null; non_null = Unknown }) ->
+    Unknown
+  | Value (Ok { is_null = Not_null; non_null = Bottom }) -> Invalid
+  | Value (Ok { is_null = Not_null; non_null = Ok head }) -> prove_gen env head
+  | Naked_immediate _ | Naked_float _ | Naked_float32 _ | Naked_int32 _
+  | Naked_int64 _ | Naked_nativeint _ | Naked_vec128 _ | Rec_info _ | Region _
+    ->
+    wrong_kind "Value" t
 
-let prove_single_closures_entry env t : _ proof =
-  match prove_single_closures_entry' env t with
-  | Proved proof -> Proved proof
-  | Unknown -> Unknown
-  | Invalid -> Invalid
-  | Wrong_kind -> Misc.fatal_errorf "Type has wrong kind: %a" TG.print t
-
-(* CR mshinwell: Try to functorise or otherwise factor out across the various
-   number kinds. *)
-let prove_naked_floats env t : _ proof =
-  let wrong_kind () =
-    Misc.fatal_errorf "Kind error: expected [Naked_float]:@ %a" TG.print t
-  in
+let gen_value_to_proof prove_gen env t : _ proof_of_property =
   match expand_head env t with
-  | Naked_float (Ok fs) -> if Float.Set.is_empty fs then Invalid else Proved fs
-  | Naked_float Unknown -> Unknown
-  | Naked_float Bottom -> Invalid
-  | Value _ -> wrong_kind ()
-  | Naked_immediate _ -> wrong_kind ()
-  | Naked_int32 _ -> wrong_kind ()
-  | Naked_int64 _ -> wrong_kind ()
-  | Naked_nativeint _ -> wrong_kind ()
-  | Rec_info _ -> wrong_kind ()
+  | Value (Unknown | Bottom)
+  | Value (Ok { is_null = Maybe_null; non_null = _ })
+  | Value (Ok { is_null = Not_null; non_null = Unknown | Bottom }) ->
+    Unknown
+  | Value (Ok { is_null = Not_null; non_null = Ok head }) ->
+    as_property (prove_gen env head)
+  | Naked_immediate _ | Naked_float _ | Naked_float32 _ | Naked_int32 _
+  | Naked_int64 _ | Naked_nativeint _ | Naked_vec128 _ | Rec_info _ | Region _
+    ->
+    wrong_kind "Value" t
 
-let prove_naked_int32s env t : _ proof =
-  let wrong_kind () =
-    Misc.fatal_errorf "Kind error: expected [Naked_int32]:@ %a" TG.print t
-  in
+let gen_value_to_meet prove_gen env t : _ meet_shortcut =
   match expand_head env t with
-  | Naked_int32 (Ok is) -> if Int32.Set.is_empty is then Invalid else Proved is
-  | Naked_int32 Unknown -> Unknown
-  | Naked_int32 Bottom -> Invalid
-  | Value _ -> wrong_kind ()
-  | Naked_immediate _ -> wrong_kind ()
-  | Naked_float _ -> wrong_kind ()
-  | Naked_int64 _ -> wrong_kind ()
-  | Naked_nativeint _ -> wrong_kind ()
-  | Rec_info _ -> wrong_kind ()
+  | Value Unknown | Value (Ok { is_null = _; non_null = Unknown }) -> Need_meet
+  | Value Bottom | Value (Ok { is_null = _; non_null = Bottom }) -> Invalid
+  | Value (Ok { is_null = _; non_null = Ok head }) ->
+    as_meet_shortcut (prove_gen env head)
+  | Naked_immediate _ | Naked_float _ | Naked_float32 _ | Naked_int32 _
+  | Naked_int64 _ | Naked_nativeint _ | Naked_vec128 _ | Rec_info _ | Region _
+    ->
+    wrong_kind "Value" t
 
-let prove_naked_int64s env t : _ proof =
-  let wrong_kind () =
-    Misc.fatal_errorf "Kind error: expected [Naked_int64]:@ %a" TG.print t
-  in
-  match expand_head env t with
-  | Naked_int64 (Ok is) -> if Int64.Set.is_empty is then Invalid else Proved is
-  | Naked_int64 Unknown -> Unknown
-  | Naked_int64 Bottom -> Invalid
-  | Value _ -> wrong_kind ()
-  | Naked_immediate _ -> wrong_kind ()
-  | Naked_float _ -> wrong_kind ()
-  | Naked_int32 _ -> wrong_kind ()
-  | Naked_nativeint _ -> wrong_kind ()
-  | Rec_info _ -> wrong_kind ()
+let prove_equals_to_simple_of_kind env t kind : Simple.t proof_of_property =
+  let original_kind = TG.kind t in
+  if not (K.equal original_kind kind)
+  then wrong_kind (Format.asprintf "%a" K.print kind) t
+  else
+    (* CR pchambart: add TE.get_alias_opt *)
+    match TG.get_alias_exn t with
+    | exception Not_found ->
+      (* CR vlaviron: We could try to turn singleton types into constants here.
+         I think there are already a few hacks to generate constant aliases
+         instead of singleton types when possible, so we might never end up here
+         with a singleton type in practice. *)
+      Unknown
+    | simple -> (
+      match
+        TE.get_canonical_simple_exn env simple ~min_name_mode:Name_mode.normal
+      with
+      | exception Not_found -> Unknown
+      | simple -> Proved simple)
 
-let prove_naked_nativeints env t : _ proof =
-  let wrong_kind () =
-    Misc.fatal_errorf "Kind error: expected [Naked_nativeint]:@ %a" TG.print t
-  in
-  match expand_head env t with
-  | Naked_nativeint (Ok is) ->
-    if Targetint_32_64.Set.is_empty is then Invalid else Proved is
-  | Naked_nativeint Unknown -> Unknown
-  | Naked_nativeint Bottom -> Invalid
-  | Value _ -> wrong_kind ()
-  | Naked_immediate _ -> wrong_kind ()
-  | Naked_float _ -> wrong_kind ()
-  | Naked_int32 _ -> wrong_kind ()
-  | Naked_int64 _ -> wrong_kind ()
-  | Rec_info _ -> wrong_kind ()
-
-let prove_is_int env t : bool proof =
-  let wrong_kind () =
-    Misc.fatal_errorf "Kind error: expected [Value]:@ %a" TG.print t
-  in
-  match expand_head env t with
-  | Value (Ok (Variant blocks_imms)) -> begin
+(* Note: this function is used for simplifying Obj.is_int, so should not assume
+   that the argument represents a variant, unless [variant_only] is [true] *)
+let prove_is_int_generic_value ~variant_only env
+    (value_head : TG.head_of_kind_value_non_null) : bool generic_proof =
+  match value_head with
+  | Variant blocks_imms -> (
     match blocks_imms.blocks, blocks_imms.immediates with
     | Unknown, Unknown -> Unknown
     | Unknown, Known imms ->
@@ -210,45 +132,35 @@ let prove_is_int env t : bool proof =
       then if is_bottom env imms then Invalid else Proved true
       else if is_bottom env imms
       then Proved false
-      else Unknown
-  end
-  | Value
-      (Ok
-        ( Boxed_float _ | Boxed_int32 _ | Boxed_int64 _ | Boxed_nativeint _
-        | Closures _ | String _ | Array _ )) ->
-    Proved false
-  | Value Unknown -> Unknown
-  | Value Bottom -> Invalid
-  | Naked_immediate _ -> wrong_kind ()
-  | Naked_float _ -> wrong_kind ()
-  | Naked_int32 _ -> wrong_kind ()
-  | Naked_int64 _ -> wrong_kind ()
-  | Naked_nativeint _ -> wrong_kind ()
-  | Rec_info _ -> wrong_kind ()
+      else Unknown)
+  | Mutable_block _ -> Proved false
+  | Boxed_float _ | Boxed_float32 _ | Boxed_int32 _ | Boxed_int64 _
+  | Boxed_vec128 _ | Boxed_nativeint _ | Closures _ | String _ | Array _ ->
+    if variant_only then Invalid else Proved false
 
-let prove_tags_must_be_a_block env t : Tag.Set.t proof =
-  let wrong_kind () =
-    Misc.fatal_errorf "Kind error: expected [Value]:@ %a" TG.print t
-  in
-  match expand_head env t with
-  | Value (Ok (Variant blocks_imms)) -> begin
+let prove_is_int_generic ~variant_only env t =
+  gen_value_to_gen (prove_is_int_generic_value ~variant_only) env t
+
+let prove_is_int env t =
+  gen_value_to_proof (prove_is_int_generic_value ~variant_only:false) env t
+
+let meet_is_int_variant_only env t =
+  gen_value_to_meet (prove_is_int_generic_value ~variant_only:true) env t
+
+(* Note: this function returns a generic proof because we want to propagate the
+   Invalid cases to prove_naked_immediates_generic, but it's not suitable for
+   implementing [meet_get_tag] because it doesn't ignore the immediates part of
+   the variant. *)
+(* CR vlaviron: Switch result to Tag.Scannable *)
+let prove_get_tag_generic_value env
+    (value_head : TG.head_of_kind_value_non_null) : Tag.Set.t generic_proof =
+  match value_head with
+  | Variant blocks_imms -> (
     match blocks_imms.immediates with
     | Unknown -> Unknown
     | Known imms -> (
       if not (is_bottom env imms)
-      then
-        (* CR vlaviron: This case could be completely ignored if we're only
-           interested in the set of tags this type can have. It is there because
-           this function used to return Invalid when it couldn't definitively
-           prove that this type represents a block, but this caused a number of
-           problems so this was switched to Unknown (which, unlike Invalid, is
-           always sound). There remain a question of whether we actually want
-           two different variants of this function, one for simplification of
-           the get_tag primitive which may reasonably expect to error if its
-           argument cannot be proved to be a block, and one for simplification
-           of CSE parameters containing a get_tag equation, which can occur at
-           places where the type is not known to be a block. *)
-        Unknown
+      then Unknown
       else
         match blocks_imms.blocks with
         | Unknown -> Unknown
@@ -258,156 +170,232 @@ let prove_tags_must_be_a_block env t : Tag.Set.t proof =
           match TG.Row_like_for_blocks.all_tags blocks with
           | Unknown -> Unknown
           | Known tags -> if Tag.Set.is_empty tags then Invalid else Proved tags
-          ))
-  end
-  | Value
-      (Ok (Boxed_float _ | Boxed_int32 _ | Boxed_int64 _ | Boxed_nativeint _))
-    ->
-    Proved (Tag.Set.singleton Tag.custom_tag)
-  | Value (Ok (Closures _)) ->
-    Proved (Tag.Set.of_list [Tag.closure_tag; Tag.infix_tag])
-  | Value (Ok (String _)) -> Proved (Tag.Set.singleton Tag.string_tag)
-  | Value (Ok (Array _)) ->
-    Proved (Tag.Set.of_list [Tag.zero; Tag.double_array_tag])
+          )))
+  | Boxed_float _ | Boxed_float32 _ | Boxed_int32 _ | Boxed_int64 _
+  | Boxed_nativeint _ | Boxed_vec128 _ ->
+    Unknown
+  | Mutable_block _ -> Unknown
+  | Closures _ -> Unknown
+  | String _ -> Unknown
+  | Array _ -> Unknown
+
+let prove_get_tag_generic env t =
+  gen_value_to_gen prove_get_tag_generic_value env t
+
+let prove_get_tag env t = gen_value_to_proof prove_get_tag_generic_value env t
+
+let prove_is_null_generic env t : _ generic_proof =
+  match expand_head env t with
   | Value Unknown -> Unknown
   | Value Bottom -> Invalid
-  (* CR mshinwell: Here and elsewhere, use or-patterns. *)
-  | Naked_immediate _ -> wrong_kind ()
-  | Naked_float _ -> wrong_kind ()
-  | Naked_int32 _ -> wrong_kind ()
-  | Naked_int64 _ -> wrong_kind ()
-  | Naked_nativeint _ -> wrong_kind ()
-  | Rec_info _ -> wrong_kind ()
+  | Value (Ok { non_null = Bottom; is_null = Not_null }) -> Invalid
+  | Value (Ok { non_null = _; is_null = Not_null }) -> Proved false
+  | Value (Ok { non_null = Bottom; is_null = _ }) -> Proved true
+  | Value (Ok { non_null = Unknown | Ok _; is_null = Maybe_null }) -> Unknown
+  | Naked_immediate _ | Naked_float _ | Naked_float32 _ | Naked_int32 _
+  | Naked_int64 _ | Naked_nativeint _ | Naked_vec128 _ | Rec_info _ | Region _
+    ->
+    wrong_kind "Value" t
 
-let prove_naked_immediates env t : Targetint_31_63.Set.t proof =
-  let wrong_kind () =
-    Misc.fatal_errorf "Kind error: expected [Naked_immediate]:@ %a" TG.print t
-  in
+let meet_is_null env t = as_meet_shortcut (prove_is_null_generic env t)
+
+let prove_naked_immediates_generic env t : Targetint_31_63.Set.t generic_proof =
   match expand_head env t with
   | Naked_immediate (Ok (Naked_immediates is)) ->
     if Targetint_31_63.Set.is_empty is then Invalid else Proved is
-  | Naked_immediate (Ok (Is_int scrutinee_ty)) -> begin
-    match prove_is_int env scrutinee_ty with
+  | Naked_immediate (Ok (Is_int scrutinee_ty)) -> (
+    match prove_is_int_generic ~variant_only:true env scrutinee_ty with
     | Proved true ->
       Proved (Targetint_31_63.Set.singleton Targetint_31_63.bool_true)
     | Proved false ->
       Proved (Targetint_31_63.Set.singleton Targetint_31_63.bool_false)
     | Unknown -> Unknown
-    | Invalid -> Invalid
-  end
-  | Naked_immediate (Ok (Get_tag block_ty)) -> begin
-    (* CR vlaviron: see the comment in prove_tags_must_be_a_block. See also
-       prove_equals_tagged_immediates below, which returns Unknown when the
-       blocks part is not bottom. *)
-    match prove_tags_must_be_a_block env block_ty with
+    | Invalid -> Invalid)
+  | Naked_immediate (Ok (Is_null scrutinee_ty)) -> (
+    match prove_is_null_generic env scrutinee_ty with
+    | Proved true ->
+      Proved (Targetint_31_63.Set.singleton Targetint_31_63.bool_true)
+    | Proved false ->
+      Proved (Targetint_31_63.Set.singleton Targetint_31_63.bool_false)
+    | Unknown -> Unknown
+    | Invalid -> Invalid)
+  | Naked_immediate (Ok (Get_tag block_ty)) -> (
+    match prove_get_tag_generic env block_ty with
     | Proved tags ->
       let is =
         Tag.Set.fold
-          (fun tag is -> Targetint_31_63.Set.add (Tag.to_target_imm tag) is)
+          (fun tag is ->
+            Targetint_31_63.Set.add (Tag.to_targetint_31_63 tag) is)
           tags Targetint_31_63.Set.empty
       in
       Proved is
     | Unknown -> Unknown
-    | Invalid -> Invalid
-  end
+    | Invalid -> Invalid)
   | Naked_immediate Unknown -> Unknown
   | Naked_immediate Bottom -> Invalid
-  | Value _ -> wrong_kind ()
-  | Naked_float _ -> wrong_kind ()
-  | Naked_int32 _ -> wrong_kind ()
-  | Naked_int64 _ -> wrong_kind ()
-  | Naked_nativeint _ -> wrong_kind ()
-  | Rec_info _ -> wrong_kind ()
+  | Value _ | Naked_float _ | Naked_float32 _ | Naked_int32 _ | Naked_int64 _
+  | Naked_nativeint _ | Naked_vec128 _ | Rec_info _ | Region _ ->
+    wrong_kind "Naked_immediate" t
 
-let prove_equals_tagged_immediates env t : Targetint_31_63.Set.t proof =
-  let wrong_kind () =
-    Misc.fatal_errorf "Kind error: expected [Value]:@ %a" TG.print t
-  in
-  match expand_head env t with
-  | Value (Ok (Variant blocks_imms)) -> begin
-    match blocks_imms.blocks, blocks_imms.immediates with
-    | Unknown, Unknown | Unknown, Known _ | Known _, Unknown -> Unknown
-    | Known blocks, Known imms ->
-      (* CR mshinwell: Check this. Again it depends on the context; is this a
-         context where variants are ok? *)
-      if not (TG.Row_like_for_blocks.is_bottom blocks)
-      then Unknown
-      else prove_naked_immediates env imms
-  end
-  | Value (Ok _) -> Invalid
-  | Value Unknown -> Unknown
-  | Value Bottom -> Invalid
-  | Naked_immediate _ -> wrong_kind ()
-  | Naked_float _ -> wrong_kind ()
-  | Naked_int32 _ -> wrong_kind ()
-  | Naked_int64 _ -> wrong_kind ()
-  | Naked_nativeint _ -> wrong_kind ()
-  | Rec_info _ -> wrong_kind ()
+let meet_naked_immediates env t =
+  as_meet_shortcut (prove_naked_immediates_generic env t)
 
-let prove_equals_single_tagged_immediate env t : _ proof =
-  match prove_equals_tagged_immediates env t with
-  | Proved imms -> begin
+(* Note: for the equals_tagged_immediates functions, we write two different
+   functions because the semantics are different, but both return generic proofs
+   to leverage the wrappers for other kinds and or_null cases *)
+let prove_equals_tagged_immediates_value env
+    (value_head : TG.head_of_kind_value_non_null) : _ generic_proof =
+  match value_head with
+  | Variant { immediates; blocks; extensions = _; is_unique = _ } -> (
+    match blocks with
+    | Unknown -> Unknown
+    | Known blocks ->
+      if TG.Row_like_for_blocks.is_bottom blocks
+      then
+        match immediates with
+        | Unknown -> Unknown
+        | Known imms -> (
+          match prove_naked_immediates_generic env imms with
+          | Proved imms -> Proved imms
+          | Invalid -> Proved Targetint_31_63.Set.empty
+          | Unknown -> Unknown)
+      else Unknown)
+  | Mutable_block _ | Boxed_float _ | Boxed_float32 _ | Boxed_int32 _
+  | Boxed_int64 _ | Boxed_vec128 _ | Boxed_nativeint _ | Closures _ | String _
+  | Array _ ->
+    Unknown
+
+let prove_equals_tagged_immediates env t =
+  gen_value_to_proof prove_equals_tagged_immediates_value env t
+
+let meet_equals_tagged_immediates_value env
+    (value_head : TG.head_of_kind_value_non_null) : _ generic_proof =
+  match value_head with
+  | Variant { immediates; blocks = _; extensions = _; is_unique = _ } -> (
+    match immediates with
+    | Unknown -> Unknown
+    | Known imms -> prove_naked_immediates_generic env imms)
+  | Mutable_block _ | Boxed_float _ | Boxed_float32 _ | Boxed_int32 _
+  | Boxed_int64 _ | Boxed_vec128 _ | Boxed_nativeint _ | Closures _ | String _
+  | Array _ ->
+    Invalid
+
+let meet_equals_tagged_immediates env t =
+  gen_value_to_meet meet_equals_tagged_immediates_value env t
+
+let meet_equals_single_tagged_immediate env t : _ meet_shortcut =
+  match meet_equals_tagged_immediates env t with
+  | Known_result imms -> (
     match Targetint_31_63.Set.get_singleton imms with
-    | Some imm -> Proved imm
-    | None -> Unknown
-  end
-  | Unknown -> Unknown
+    | Some imm -> Known_result imm
+    | None -> Need_meet)
+  | Need_meet -> Need_meet
   | Invalid -> Invalid
 
-let prove_tags_and_sizes env t : Targetint_31_63.Imm.t Tag.Map.t proof =
+type _ meet_naked_number_kind =
+  | Float32 : Float32.Set.t meet_naked_number_kind
+  | Float : Float.Set.t meet_naked_number_kind
+  | Int32 : Int32.Set.t meet_naked_number_kind
+  | Int64 : Int64.Set.t meet_naked_number_kind
+  | Nativeint : Targetint_32_64.Set.t meet_naked_number_kind
+  | Vec128 : Vector_types.Vec128.Bit_pattern.Set.t meet_naked_number_kind
+
+let[@inline] meet_naked_number (type a) (kind : a meet_naked_number_kind) env t
+    : a meet_shortcut =
+  let head_to_proof (head : _ Or_unknown_or_bottom.t) coercion ~is_empty :
+      _ meet_shortcut =
+    match head with
+    | Ok set ->
+      let set = coercion set in
+      if is_empty set then Invalid else Known_result set
+    | Unknown -> Need_meet
+    | Bottom -> Invalid
+  in
   let wrong_kind () =
-    Misc.fatal_errorf "Kind error: expected [Value]:@ %a" TG.print t
+    let kind_string =
+      match kind with
+      | Float32 -> "Naked_float32"
+      | Float -> "Naked_float"
+      | Int32 -> "Naked_int32"
+      | Int64 -> "Naked_int64"
+      | Nativeint -> "Naked_nativeint"
+      | Vec128 -> "Naked_vec128"
+    in
+    wrong_kind kind_string t
   in
   match expand_head env t with
-  | Value (Ok (Variant blocks_imms)) -> begin
-    match blocks_imms.immediates with
-    (* CR mshinwell: Care. Should this return [Unknown] or [Invalid] if there is
-       the possibility of the type representing a tagged immediate? *)
-    | Unknown -> Unknown
-    | Known immediates ->
-      if is_bottom env immediates
-      then
-        match blocks_imms.blocks with
-        | Unknown -> Unknown
-        | Known blocks -> (
-          match TG.Row_like_for_blocks.all_tags_and_sizes blocks with
-          | Unknown -> Unknown
-          | Known tags_and_sizes -> Proved tags_and_sizes)
-      else Unknown
-  end
-  | Value (Ok _) -> Invalid
-  | Value Unknown -> Unknown
-  | Value Bottom -> Invalid
-  (* CR mshinwell: Here and elsewhere, use or-patterns. *)
+  | Value _ -> wrong_kind ()
   | Naked_immediate _ -> wrong_kind ()
-  | Naked_float _ -> wrong_kind ()
-  | Naked_int32 _ -> wrong_kind ()
-  | Naked_int64 _ -> wrong_kind ()
-  | Naked_nativeint _ -> wrong_kind ()
   | Rec_info _ -> wrong_kind ()
+  | Region _ -> wrong_kind ()
+  | Naked_float32 fs -> (
+    match kind with
+    | Float32 ->
+      head_to_proof fs
+        (fun (fs : TG.head_of_kind_naked_float32) -> (fs :> Float32.Set.t))
+        ~is_empty:Float32.Set.is_empty
+    | _ -> wrong_kind ())
+  | Naked_float fs -> (
+    match kind with
+    | Float ->
+      head_to_proof fs
+        (fun (fs : TG.head_of_kind_naked_float) -> (fs :> Float.Set.t))
+        ~is_empty:Float.Set.is_empty
+    | _ -> wrong_kind ())
+  | Naked_int32 is -> (
+    match kind with
+    | Int32 ->
+      head_to_proof is
+        (fun (is : TG.head_of_kind_naked_int32) -> (is :> Int32.Set.t))
+        ~is_empty:Int32.Set.is_empty
+    | _ -> wrong_kind ())
+  | Naked_int64 is -> (
+    match kind with
+    | Int64 ->
+      head_to_proof is
+        (fun (is : TG.head_of_kind_naked_int64) -> (is :> Int64.Set.t))
+        ~is_empty:Int64.Set.is_empty
+    | _ -> wrong_kind ())
+  | Naked_nativeint is -> (
+    match kind with
+    | Nativeint ->
+      head_to_proof is
+        (fun (is : TG.head_of_kind_naked_nativeint) ->
+          (is :> Targetint_32_64.Set.t))
+        ~is_empty:Targetint_32_64.Set.is_empty
+    | _ -> wrong_kind ())
+  | Naked_vec128 vs -> (
+    match kind with
+    | Vec128 ->
+      head_to_proof vs
+        (fun (fs : TG.head_of_kind_naked_vec128) ->
+          (fs :> Vector_types.Vec128.Bit_pattern.Set.t))
+        ~is_empty:Vector_types.Vec128.Bit_pattern.Set.is_empty
+    | _ -> wrong_kind ())
 
-let prove_unique_tag_and_size env t :
-    (Tag.t * Targetint_31_63.Imm.t) proof_allowing_kind_mismatch =
-  if not (Flambda_kind.equal (TG.kind t) Flambda_kind.value)
-  then Wrong_kind
-  else
-    match prove_tags_and_sizes env t with
-    | Invalid -> Invalid
-    | Unknown -> Unknown
-    | Proved tags_to_sizes -> (
-      match Tag.Map.get_singleton tags_to_sizes with
-      | None -> Unknown
-      | Some (tag, size) -> Proved (tag, size))
+let meet_naked_float32s = meet_naked_number Float32
+
+let meet_naked_floats = meet_naked_number Float
+
+let meet_naked_int32s = meet_naked_number Int32
+
+let meet_naked_int64s = meet_naked_number Int64
+
+let meet_naked_nativeints = meet_naked_number Nativeint
+
+let meet_naked_vec128s = meet_naked_number Vec128
 
 type variant_like_proof =
   { const_ctors : Targetint_31_63.Set.t Or_unknown.t;
-    non_const_ctors_with_sizes : Targetint_31_63.Imm.t Tag.Scannable.Map.t
+    non_const_ctors_with_sizes :
+      (Targetint_31_63.t * K.Block_shape.t) Tag.Scannable.Map.t
   }
 
-let prove_variant_like env t : variant_like_proof proof_allowing_kind_mismatch =
-  (* Format.eprintf "prove_variant:@ %a\n%!" TG.print t; *)
-  match expand_head env t with
-  | Value (Ok (Variant blocks_imms)) -> begin
+let prove_variant_like_generic_value env
+    (value_head : TG.head_of_kind_value_non_null) :
+    variant_like_proof generic_proof =
+  match value_head with
+  | Variant blocks_imms -> (
     match blocks_imms.blocks with
     | Unknown -> Unknown
     | Known blocks -> (
@@ -415,6 +403,8 @@ let prove_variant_like env t : variant_like_proof proof_allowing_kind_mismatch =
       | Unknown -> Unknown
       | Known non_const_ctors_with_sizes -> (
         let non_const_ctors_with_sizes =
+          (* CR pchambart: we could ignore non-scannable tags for the meet_
+             version *)
           Tag.Map.fold
             (fun tag size (result : _ Or_unknown.t) : _ Or_unknown.t ->
               match result with
@@ -432,440 +422,861 @@ let prove_variant_like env t : variant_like_proof proof_allowing_kind_mismatch =
           let const_ctors : _ Or_unknown.t =
             match blocks_imms.immediates with
             | Unknown -> Unknown
-            | Known imms -> begin
-              match prove_naked_immediates env imms with
+            | Known imms -> (
+              match prove_naked_immediates_generic env imms with
               | Unknown -> Unknown
               | Invalid -> Known Targetint_31_63.Set.empty
-              | Proved const_ctors -> Known const_ctors
-            end
+              | Proved const_ctors -> Known const_ctors)
           in
-          Proved { const_ctors; non_const_ctors_with_sizes }))
-  end
-  | Value (Ok _) -> Invalid
-  | Value Unknown -> Unknown
-  | Value Bottom -> Invalid
-  | Naked_immediate _ -> Wrong_kind
-  | Naked_float _ -> Wrong_kind
-  | Naked_int32 _ -> Wrong_kind
-  | Naked_int64 _ -> Wrong_kind
-  | Naked_nativeint _ -> Wrong_kind
-  | Rec_info _ -> Wrong_kind
-
-let prove_is_a_boxed_number env t :
-    Flambda_kind.Boxable_number.t proof_allowing_kind_mismatch =
-  match expand_head env t with
-  | Value Unknown -> Unknown
-  | Value (Ok (Variant { blocks; immediates; is_unique = _ })) -> begin
-    match blocks, immediates with
-    | Unknown, Unknown -> Unknown
-    | Unknown, Known imms -> if is_bottom env imms then Invalid else Unknown
-    | Known blocks, Unknown ->
-      if TG.Row_like_for_blocks.is_bottom blocks
-      then Proved Untagged_immediate
-      else Unknown
-    | Known blocks, Known imms ->
-      if is_bottom env imms
-      then Invalid
-      else if TG.Row_like_for_blocks.is_bottom blocks
-      then Proved Untagged_immediate
-      else Unknown
-  end
-  | Value (Ok (Boxed_float _)) -> Proved Naked_float
-  | Value (Ok (Boxed_int32 _)) -> Proved Naked_int32
-  | Value (Ok (Boxed_int64 _)) -> Proved Naked_int64
-  | Value (Ok (Boxed_nativeint _)) -> Proved Naked_nativeint
-  | Value _ -> Invalid
-  | _ -> Wrong_kind
-
-let prove_is_a_tagged_immediate env t : _ proof_allowing_kind_mismatch =
-  match prove_is_a_boxed_number env t with
-  | Proved Untagged_immediate -> Proved ()
-  | Proved _ -> Unknown
-  | Invalid -> Invalid
-  | Wrong_kind -> Wrong_kind
-  | Unknown -> Unknown
-
-let prove_is_a_boxed_float env t : _ proof_allowing_kind_mismatch =
-  match expand_head env t with
-  | Value Unknown -> Unknown
-  | Value (Ok (Boxed_float _)) -> Proved ()
-  | Value _ -> Invalid
-  | _ -> Wrong_kind
-
-let prove_is_or_is_not_a_boxed_float env t : _ proof_allowing_kind_mismatch =
-  match expand_head env t with
-  | Value Unknown -> Unknown
-  | Value Bottom -> Invalid
-  | Value (Ok (Boxed_float _)) -> Proved true
-  | Value (Ok _) -> Proved false
-  | _ -> Wrong_kind
-
-let prove_is_a_boxed_int32 env t : _ proof_allowing_kind_mismatch =
-  match expand_head env t with
-  | Value Unknown -> Unknown
-  | Value (Ok (Boxed_int32 _)) -> Proved ()
-  | Value _ -> Invalid
-  | _ -> Wrong_kind
-
-let prove_is_a_boxed_int64 env t : _ proof_allowing_kind_mismatch =
-  match expand_head env t with
-  | Value Unknown -> Unknown
-  | Value (Ok (Boxed_int64 _)) -> Proved ()
-  | Value _ -> Invalid
-  | _ -> Wrong_kind
-
-let prove_is_a_boxed_nativeint env t : _ proof_allowing_kind_mismatch =
-  match expand_head env t with
-  | Value Unknown -> Unknown
-  | Value (Ok (Boxed_nativeint _)) -> Proved ()
-  | Value _ -> Invalid
-  | _ -> Wrong_kind
-
-(* CR mshinwell: Factor out code from the following. *)
-
-let prove_boxed_floats env t : _ proof =
-  let result_var = Variable.create "result" in
-  let result_var' = Bound_var.create result_var Name_mode.normal in
-  let result_simple = Simple.var result_var in
-  let result_kind = K.naked_float in
-  let shape = TG.box_float (TG.alias_type_of result_kind result_simple) in
-  match
-    Meet_and_join.meet_shape env t ~shape ~result_var:result_var' ~result_kind
-  with
-  | Bottom -> Invalid
-  | Ok env_extension ->
-    let env =
-      TE.add_definition env
-        (Bound_name.create (Name.var result_var) Name_mode.normal)
-        result_kind
-    in
-    let env =
-      TE.add_env_extension env env_extension ~meet_type:Meet_and_join.meet
-    in
-    let t = TE.find env (Name.var result_var) (Some result_kind) in
-    prove_naked_floats env t
-
-let prove_boxed_int32s env t : _ proof =
-  let result_var = Variable.create "result" in
-  let result_var' = Bound_var.create result_var Name_mode.normal in
-  let result_simple = Simple.var result_var in
-  let result_kind = K.naked_int32 in
-  let shape = TG.box_int32 (TG.alias_type_of result_kind result_simple) in
-  match
-    Meet_and_join.meet_shape env t ~shape ~result_var:result_var' ~result_kind
-  with
-  | Bottom -> Invalid
-  | Ok env_extension ->
-    let env =
-      TE.add_definition env
-        (Bound_name.create (Name.var result_var) Name_mode.normal)
-        result_kind
-    in
-    let env =
-      TE.add_env_extension env env_extension ~meet_type:Meet_and_join.meet
-    in
-    let t = TE.find env (Name.var result_var) (Some result_kind) in
-    prove_naked_int32s env t
-
-let prove_boxed_int64s env t : _ proof =
-  let result_var = Variable.create "result" in
-  let result_var' = Bound_var.create result_var Name_mode.normal in
-  let result_simple = Simple.var result_var in
-  let result_kind = K.naked_int64 in
-  let shape = TG.box_int64 (TG.alias_type_of result_kind result_simple) in
-  match
-    Meet_and_join.meet_shape env t ~shape ~result_var:result_var' ~result_kind
-  with
-  | Bottom -> Invalid
-  | Ok env_extension ->
-    let env =
-      TE.add_definition env
-        (Bound_name.create (Name.var result_var) Name_mode.normal)
-        result_kind
-    in
-    let env =
-      TE.add_env_extension env env_extension ~meet_type:Meet_and_join.meet
-    in
-    let t = TE.find env (Name.var result_var) (Some result_kind) in
-    prove_naked_int64s env t
-
-let prove_boxed_nativeints env t : _ proof =
-  let result_var = Variable.create "result" in
-  let result_var' = Bound_var.create result_var Name_mode.normal in
-  let result_simple = Simple.var result_var in
-  let result_kind = K.naked_nativeint in
-  let shape = TG.box_nativeint (TG.alias_type_of result_kind result_simple) in
-  match
-    Meet_and_join.meet_shape env t ~shape ~result_var:result_var' ~result_kind
-  with
-  | Bottom -> Invalid
-  | Ok env_extension ->
-    let env =
-      TE.add_definition env
-        (Bound_name.create (Name.var result_var) Name_mode.normal)
-        result_kind
-    in
-    let env =
-      TE.add_env_extension env env_extension ~meet_type:Meet_and_join.meet
-    in
-    let t = TE.find env (Name.var result_var) (Some result_kind) in
-    prove_naked_nativeints env t
-
-let prove_strings env t : String_info.Set.t proof =
-  let wrong_kind () =
-    Misc.fatal_errorf "Kind error: expected [Value]:@ %a" TG.print t
-  in
-  match expand_head env t with
-  | Value (Ok (String strs)) -> Proved strs
-  | Value (Ok _) -> Invalid
-  | Value Unknown -> Unknown
-  | Value Bottom -> Invalid
-  | Naked_immediate _ | Naked_float _ | Naked_int32 _ | Naked_int64 _
-  | Naked_nativeint _ | Rec_info _ ->
-    wrong_kind ()
-
-type array_kind_compatibility =
-  | Exact
-  | Compatible
-  | Incompatible
-
-let prove_is_array_with_element_kind env t ~element_kind : _ proof =
-  match expand_head env t with
-  | Value Unknown -> Unknown
-  | Value Bottom -> Invalid
-  | Value (Ok (Array { element_kind = Unknown; _ })) -> Unknown
-  | Value (Ok (Array { element_kind = Known element_kind'; _ })) ->
-    if K.With_subkind.equal element_kind' element_kind
-    then Proved Exact
-    else if K.With_subkind.compatible element_kind ~when_used_at:element_kind'
-            || K.With_subkind.compatible element_kind'
-                 ~when_used_at:element_kind
-    then Proved Compatible
-    else Proved Incompatible
-  | Value (Ok _)
-  | Naked_immediate _ | Naked_float _ | Naked_int32 _ | Naked_int64 _
-  | Naked_nativeint _ | Rec_info _ ->
+          Proved { const_ctors; non_const_ctors_with_sizes })))
+  | Mutable_block _ -> Unknown
+  | Array _ -> Unknown (* We could return Invalid in a strict mode *)
+  | Closures _ | Boxed_float _ | Boxed_float32 _ | Boxed_int32 _ | Boxed_int64 _
+  | Boxed_vec128 _ | Boxed_nativeint _ | String _ ->
     Invalid
 
-type prove_tagging_function =
-  | Prove_could_be_tagging_of_simple
-  | Prove_is_always_tagging_of_simple
+let meet_variant_like env t =
+  gen_value_to_meet prove_variant_like_generic_value env t
 
-let prove_is_tagging_of_simple ~prove_function env ~min_name_mode t :
-    Simple.t proof =
-  let wrong_kind () =
-    Misc.fatal_errorf "Kind error: expected [Value]:@ %a" TG.print t
-  in
-  match expand_head env t with
-  | Value (Ok (Variant { immediates; blocks; is_unique = _ })) -> begin
+let prove_variant_like env t =
+  gen_value_to_proof prove_variant_like_generic_value env t
+
+type boxed_or_tagged_number =
+  | Boxed of
+      Alloc_mode.For_types.t * Flambda_kind.Boxable_number.t * Type_grammar.t
+  | Tagged_immediate
+
+let prove_is_a_boxed_or_tagged_number_value _env
+    (value_head : TG.head_of_kind_value_non_null) :
+    boxed_or_tagged_number generic_proof =
+  match value_head with
+  | Variant { blocks; immediates = _; extensions = _; is_unique = _ } -> (
     match blocks with
     | Unknown -> Unknown
-    | Known blocks -> (
-      match prove_function with
-      | Prove_is_always_tagging_of_simple
-        when not (TG.Row_like_for_blocks.is_bottom blocks) ->
-        Unknown
-      | Prove_is_always_tagging_of_simple
-        (* when (Row_like_for_blocks.is_bottom blocks) *)
-      | Prove_could_be_tagging_of_simple -> (
-        match immediates with
+    | Known blocks ->
+      if TG.Row_like_for_blocks.is_bottom blocks
+      then Proved Tagged_immediate
+      else Unknown)
+  | Boxed_float (contents_ty, alloc_mode) ->
+    Proved (Boxed (alloc_mode, Naked_float, contents_ty))
+  | Boxed_float32 (contents_ty, alloc_mode) ->
+    Proved (Boxed (alloc_mode, Naked_float32, contents_ty))
+  | Boxed_int32 (contents_ty, alloc_mode) ->
+    Proved (Boxed (alloc_mode, Naked_int32, contents_ty))
+  | Boxed_int64 (contents_ty, alloc_mode) ->
+    Proved (Boxed (alloc_mode, Naked_int64, contents_ty))
+  | Boxed_nativeint (contents_ty, alloc_mode) ->
+    Proved (Boxed (alloc_mode, Naked_nativeint, contents_ty))
+  | Boxed_vec128 (contents_ty, alloc_mode) ->
+    Proved (Boxed (alloc_mode, Naked_vec128, contents_ty))
+  | Mutable_block _ | Closures _ | String _ | Array _ -> Unknown
+
+let prove_is_a_boxed_or_tagged_number env t =
+  gen_value_to_proof prove_is_a_boxed_or_tagged_number_value env t
+
+let prove_is_a_tagged_immediate env t : _ proof_of_property =
+  match prove_is_a_boxed_or_tagged_number env t with
+  | Proved Tagged_immediate -> Proved ()
+  | Proved _ -> Unknown
+  | Unknown -> Unknown
+
+let prove_is_a_boxed_float32 env t : _ proof_of_property =
+  match prove_is_a_boxed_or_tagged_number env t with
+  | Proved (Boxed (_, Naked_float32, _)) -> Proved ()
+  | Proved _ -> Unknown
+  | Unknown -> Unknown
+
+let prove_is_a_boxed_float env t : _ proof_of_property =
+  match prove_is_a_boxed_or_tagged_number env t with
+  | Proved (Boxed (_, Naked_float, _)) -> Proved ()
+  | Proved _ -> Unknown
+  | Unknown -> Unknown
+
+let prove_is_or_is_not_a_boxed_float_value _env
+    (value_head : TG.head_of_kind_value_non_null) : _ generic_proof =
+  match value_head with Boxed_float _ -> Proved true | _ -> Proved false
+
+let prove_is_or_is_not_a_boxed_float env t =
+  gen_value_to_proof prove_is_or_is_not_a_boxed_float_value env t
+
+let prove_is_a_boxed_int32 env t : _ proof_of_property =
+  match prove_is_a_boxed_or_tagged_number env t with
+  | Proved (Boxed (_, Naked_int32, _)) -> Proved ()
+  | Proved _ -> Unknown
+  | Unknown -> Unknown
+
+let prove_is_a_boxed_int64 env t : _ proof_of_property =
+  match prove_is_a_boxed_or_tagged_number env t with
+  | Proved (Boxed (_, Naked_int64, _)) -> Proved ()
+  | Proved _ -> Unknown
+  | Unknown -> Unknown
+
+let prove_is_a_boxed_nativeint env t : _ proof_of_property =
+  match prove_is_a_boxed_or_tagged_number env t with
+  | Proved (Boxed (_, Naked_nativeint, _)) -> Proved ()
+  | Proved _ -> Unknown
+  | Unknown -> Unknown
+
+let prove_is_a_boxed_vec128 env t : _ proof_of_property =
+  match prove_is_a_boxed_or_tagged_number env t with
+  | Proved (Boxed (_, Naked_vec128, _)) -> Proved ()
+  | Proved _ -> Unknown
+  | Unknown -> Unknown
+
+let prove_unique_tag_and_size_value env
+    (value_head : TG.head_of_kind_value_non_null) :
+    (Tag.t
+    * K.Block_shape.t
+    * Targetint_31_63.t
+    * TG.Product.Int_indexed.t
+    * Alloc_mode.For_types.t)
+    generic_proof =
+  match value_head with
+  | Variant blocks_imms -> (
+    match blocks_imms.immediates with
+    | Unknown -> Unknown
+    | Known immediates ->
+      if is_bottom env immediates
+      then
+        match blocks_imms.blocks with
         | Unknown -> Unknown
-        | Known t -> (
-          let from_alias =
-            match
-              TE.get_canonical_simple_exn env ~min_name_mode
-                (TG.get_alias_exn t)
-            with
-            | simple -> Some simple
-            | exception Not_found -> None
-          in
-          match from_alias with
-          | Some simple -> Proved simple
-          | None -> (
-            match prove_naked_immediates env t with
-            | Unknown -> Unknown
-            | Invalid -> Invalid
-            | Proved imms -> (
-              match Targetint_31_63.Set.get_singleton imms with
-              | Some imm ->
-                Proved (Simple.const (Reg_width_const.naked_immediate imm))
-              | None -> Unknown)))))
-  end
-  | Value Unknown -> Unknown
-  | Value _ -> Invalid
-  | Naked_immediate _ | Naked_float _ | Naked_int32 _ | Naked_int64 _
-  | Naked_nativeint _ | Rec_info _ ->
-    wrong_kind ()
+        | Known blocks -> (
+          match TG.Row_like_for_blocks.get_singleton blocks with
+          | None -> Unknown
+          | Some (tag, shape, size, product, alloc_mode) ->
+            Proved (tag, shape, size, product, alloc_mode))
+      else Unknown)
+  | Mutable_block _ | Array _ | Closures _ | Boxed_float _ | Boxed_float32 _
+  | Boxed_int32 _ | Boxed_int64 _ | Boxed_vec128 _ | Boxed_nativeint _
+  | String _ ->
+    Unknown
 
-let prove_is_always_tagging_of_simple =
-  prove_is_tagging_of_simple ~prove_function:Prove_is_always_tagging_of_simple
+let prove_unique_tag_and_size env t :
+    (Tag.t * K.Block_shape.t * Targetint_31_63.t) proof_of_property =
+  match gen_value_to_proof prove_unique_tag_and_size_value env t with
+  | Proved (tag, shape, size, _, _) -> Proved (tag, shape, size)
+  | Unknown -> Unknown
 
-let prove_could_be_tagging_of_simple =
-  prove_is_tagging_of_simple ~prove_function:Prove_could_be_tagging_of_simple
+let prove_unique_fully_constructed_immutable_heap_block env t :
+    _ proof_of_property =
+  match gen_value_to_proof prove_unique_tag_and_size_value env t with
+  | Unknown | Proved (_, _, _, _, (Heap_or_local | Local)) -> Unknown
+  | Proved (tag, shape, size, product, Heap) -> (
+    let result =
+      List.fold_left
+        (fun (result : _ proof_of_property) field_ty : _ proof_of_property ->
+          match result with
+          | Unknown -> result
+          | Proved simples_rev -> (
+            match TG.get_alias_exn field_ty with
+            | exception Not_found -> Unknown
+            | simple -> Proved (simple :: simples_rev)))
+        (Proved [] : _ proof_of_property)
+        (TG.Product.Int_indexed.components product)
+    in
+    match result with
+    | Unknown -> Unknown
+    | Proved simples -> Proved (tag, shape, size, List.rev simples))
 
-let[@inline always] prove_boxed_number_containing_simple
-    ~contents_of_boxed_number env ~min_name_mode t : Simple.t proof =
+(* Note: we do not implement this in terms of [meet_is_naked_number_array]
+   (below), as the semantics is slightly different. *)
+let meet_is_flat_float_array_value _env
+    (value_head : TG.head_of_kind_value_non_null) : bool generic_proof =
+  match value_head with
+  | Array { element_kind = Unknown; _ } -> Unknown
+  | Array { element_kind = Bottom; _ } ->
+    (* Empty array case. We cannot return Invalid, but any other result is
+       correct. We arbitrarily pick [false], as this is what we would get if we
+       looked at the tag at runtime. *)
+    Proved false
+  | Array { element_kind = Ok element_kind; _ } -> (
+    match K.With_subkind.kind element_kind with
+    | Value -> Proved false
+    | Naked_number Naked_float -> Proved true
+    | Naked_number _ -> Invalid
+    | Region | Rec_info ->
+      Misc.fatal_errorf "Wrong element kind for array: %a" K.With_subkind.print
+        element_kind)
+  | Boxed_float _ | Boxed_float32 _ | Boxed_int32 _ | Boxed_int64 _
+  | Boxed_nativeint _ | Boxed_vec128 _ | Closures _ | String _ ->
+    Invalid
+  | Variant _ | Mutable_block _ ->
+    (* In case of untyped code using array primitives on regular blocks *)
+    Unknown
+
+let meet_is_flat_float_array env t =
+  gen_value_to_meet meet_is_flat_float_array_value env t
+
+let meet_is_non_empty_naked_number_array_value naked_number_kind _env
+    (value_head : TG.head_of_kind_value_non_null) : unit generic_proof =
+  match value_head with
+  | Array { element_kind = Unknown; _ } -> Unknown
+  | Array { element_kind = Bottom; _ } -> Invalid
+  | Array { element_kind = Ok element_kind; _ } -> (
+    match K.With_subkind.kind element_kind with
+    | Value -> Invalid
+    | Naked_number naked_number_kind' ->
+      if K.Naked_number_kind.equal naked_number_kind naked_number_kind'
+      then Proved ()
+      else Invalid
+    | Region | Rec_info ->
+      Misc.fatal_errorf "Wrong element kind for array: %a" K.With_subkind.print
+        element_kind)
+  | Variant _ | Mutable_block _ | Boxed_float _ | Boxed_float32 _
+  | Boxed_int32 _ | Boxed_int64 _ | Boxed_nativeint _ | Boxed_vec128 _
+  | Closures _ | String _ ->
+    Invalid
+
+let meet_is_non_empty_naked_number_array naked_number_kind env t =
+  gen_value_to_meet
+    (meet_is_non_empty_naked_number_array_value naked_number_kind)
+    env t
+
+let prove_is_immediates_array_value _env
+    (value_head : TG.head_of_kind_value_non_null) : unit generic_proof =
+  match value_head with
+  | Array { element_kind = Unknown; _ } -> Unknown
+  | Array { element_kind = Bottom; _ } ->
+    (* Empty array case. We cannot return Invalid, but it's correct to state
+       that any value contained in this array must be an immediate. *)
+    Proved ()
+  | Array { element_kind = Ok element_kind; _ } -> (
+    match K.With_subkind.non_null_value_subkind element_kind with
+    | Tagged_immediate -> Proved ()
+    | Anything | Boxed_float | Boxed_float32 | Boxed_int32 | Boxed_int64
+    | Boxed_nativeint | Boxed_vec128 | Variant _ | Float_block _ | Float_array
+    | Immediate_array | Value_array | Generic_array | Unboxed_float32_array
+    | Unboxed_int32_array | Unboxed_int64_array | Unboxed_nativeint_array
+    | Unboxed_vec128_array | Unboxed_product_array ->
+      Unknown)
+  | Variant _ | Mutable_block _ | Boxed_float _ | Boxed_float32 _
+  | Boxed_int32 _ | Boxed_vec128 _ | Boxed_int64 _ | Boxed_nativeint _
+  | Closures _ | String _ ->
+    Unknown
+
+let prove_is_immediates_array env t =
+  gen_value_to_proof prove_is_immediates_array_value env t
+
+let prove_single_closures_entry_generic_value _env
+    (value_head : TG.head_of_kind_value_non_null) : _ generic_proof =
+  match value_head with
+  | Closures { by_function_slot; alloc_mode } -> (
+    let of_singleton_type ~exact function_slot closures_entry : _ generic_proof
+        =
+      let function_type =
+        TG.Closures_entry.find_function_type closures_entry ~exact function_slot
+      in
+      match function_type with
+      | Bottom -> Invalid
+      | Unknown -> Unknown
+      | Ok function_type ->
+        Proved (function_slot, alloc_mode, closures_entry, function_type)
+    in
+    match TG.Row_like_for_closures.get_single_tag by_function_slot with
+    | No_singleton -> Unknown
+    | Exact_closure (function_slot, closures_entry) ->
+      of_singleton_type ~exact:true function_slot closures_entry
+    | Incomplete_closure (function_slot, closures_entry) ->
+      of_singleton_type ~exact:false function_slot closures_entry)
+  | Variant _ | Mutable_block _ | Boxed_float _ | Boxed_float32 _
+  | Boxed_int32 _ | Boxed_vec128 _ | Boxed_int64 _ | Boxed_nativeint _
+  | String _ | Array _ ->
+    Invalid
+
+let meet_single_closures_entry env t =
+  gen_value_to_meet prove_single_closures_entry_generic_value env t
+
+let prove_single_closures_entry env t =
+  gen_value_to_proof prove_single_closures_entry_generic_value env t
+
+let prove_is_immutable_array_generic_value _env
+    (value_head : TG.head_of_kind_value_non_null) : _ generic_proof =
+  match value_head with
+  | Array { element_kind; length = _; contents; alloc_mode } -> (
+    match contents with
+    | Known (Immutable { fields }) -> Proved (element_kind, fields, alloc_mode)
+    | Known Mutable -> Invalid
+    | Unknown -> Unknown)
+  | Variant _ | Mutable_block _ | Boxed_float _ | Boxed_float32 _
+  | Boxed_int32 _ | Boxed_vec128 _ | Boxed_int64 _ | Boxed_nativeint _
+  | String _ | Closures _ ->
+    Unknown
+
+let meet_is_immutable_array env t =
+  gen_value_to_meet prove_is_immutable_array_generic_value env t
+
+let prove_is_immutable_array env t =
+  gen_value_to_proof prove_is_immutable_array_generic_value env t
+
+let prove_strings_value _env (value_head : TG.head_of_kind_value_non_null) :
+    String_info.Set.t generic_proof =
+  match value_head with
+  | String strs -> Proved strs
+  | Variant _ | Mutable_block _ | Boxed_float _ | Boxed_float32 _
+  | Boxed_int32 _ | Boxed_vec128 _ | Boxed_int64 _ | Boxed_nativeint _ | Array _
+  | Closures _ ->
+    Invalid
+
+let meet_strings env t = gen_value_to_meet prove_strings_value env t
+
+let prove_strings env t = gen_value_to_proof prove_strings_value env t
+
+type tagging_proof_kind =
+  | Prove
+  | Meet
+
+let[@inline always] inspect_tagging_of_simple_value proof_kind ~min_name_mode
+    env (value_head : TG.head_of_kind_value_non_null) : Simple.t generic_proof =
+  match value_head with
+  | Variant { immediates; blocks; extensions = _; is_unique = _ } -> (
+    let inspect_immediates () =
+      match immediates with
+      | Unknown -> Unknown
+      | Known t -> (
+        let from_alias =
+          match
+            TE.get_canonical_simple_exn env ~min_name_mode (TG.get_alias_exn t)
+          with
+          | simple -> Some simple
+          | exception Not_found -> None
+        in
+        match from_alias with
+        | Some simple -> Proved simple
+        | None -> (
+          match meet_naked_immediates env t with
+          | Need_meet -> Unknown
+          | Invalid -> Invalid
+          | Known_result imms -> (
+            match Targetint_31_63.Set.get_singleton imms with
+            | Some imm ->
+              Proved (Simple.const (Reg_width_const.naked_immediate imm))
+            | None -> Unknown)))
+    in
+    match proof_kind, blocks with
+    | Prove, Unknown -> Unknown
+    | Prove, Known blocks ->
+      if TG.Row_like_for_blocks.is_bottom blocks
+      then inspect_immediates ()
+      else Unknown
+    | Meet, _ -> inspect_immediates ())
+  | Mutable_block _ | Boxed_float _ | Boxed_float32 _ | Boxed_int32 _
+  | Boxed_vec128 _ | Boxed_int64 _ | Boxed_nativeint _ | String _ | Array _
+  | Closures _ ->
+    Unknown
+
+let prove_tagging_of_simple env ~min_name_mode t =
+  gen_value_to_proof
+    (inspect_tagging_of_simple_value Prove ~min_name_mode)
+    env t
+
+let meet_tagging_of_simple env ~min_name_mode t =
+  gen_value_to_meet (inspect_tagging_of_simple_value Meet ~min_name_mode) env t
+
+let[@inline always] meet_boxed_number_containing_simple
+    ~contents_of_boxed_number env ~min_name_mode t : Simple.t meet_shortcut =
   match expand_head env t with
-  | Value (Ok ty_value) -> begin
+  | Value (Ok { is_null = _; non_null = Ok ty_value }) -> (
     match contents_of_boxed_number ty_value with
     | None -> Invalid
     | Some ty -> (
       match
         TE.get_canonical_simple_exn env ~min_name_mode (TG.get_alias_exn ty)
       with
-      | simple -> Proved simple
-      | exception Not_found -> Unknown)
-  end
-  | Value Unknown -> Unknown
-  | Value Bottom -> Invalid
-  | Naked_immediate _ | Naked_float _ | Naked_int32 _ | Naked_int64 _
-  | Naked_nativeint _ | Rec_info _ ->
+      | simple -> Known_result simple
+      | exception Not_found -> Need_meet))
+  | Value (Ok { is_null = _; non_null = Unknown }) | Value Unknown -> Need_meet
+  | Value (Ok { is_null = _; non_null = Bottom }) | Value Bottom -> Invalid
+  | Naked_immediate _ | Naked_float _ | Naked_float32 _ | Naked_int32 _
+  | Naked_int64 _ | Naked_vec128 _ | Naked_nativeint _ | Rec_info _ | Region _
+    ->
     Misc.fatal_errorf "Kind error: expected [Value]:@ %a" TG.print t
 
-let prove_boxed_float_containing_simple =
-  prove_boxed_number_containing_simple
-    ~contents_of_boxed_number:(fun (ty_value : TG.head_of_kind_value) ->
+let meet_boxed_float32_containing_simple =
+  meet_boxed_number_containing_simple
+    ~contents_of_boxed_number:(fun (ty_value : TG.head_of_kind_value_non_null)
+                              ->
       match ty_value with
-      | Boxed_float ty -> Some ty
-      | Variant _ | Boxed_int32 _ | Boxed_int64 _ | Boxed_nativeint _
-      | Closures _ | String _ | Array _ ->
-        None)
-
-let prove_boxed_int32_containing_simple =
-  prove_boxed_number_containing_simple
-    ~contents_of_boxed_number:(fun (ty_value : TG.head_of_kind_value) ->
-      match ty_value with
-      | Boxed_int32 ty -> Some ty
-      | Variant _ | Boxed_float _ | Boxed_int64 _ | Boxed_nativeint _
-      | Closures _ | String _ | Array _ ->
-        None)
-
-let prove_boxed_int64_containing_simple =
-  prove_boxed_number_containing_simple
-    ~contents_of_boxed_number:(fun (ty_value : TG.head_of_kind_value) ->
-      match ty_value with
-      | Boxed_int64 ty -> Some ty
-      | Variant _ | Boxed_float _ | Boxed_int32 _ | Boxed_nativeint _
-      | Closures _ | String _ | Array _ ->
-        None)
-
-let prove_boxed_nativeint_containing_simple =
-  prove_boxed_number_containing_simple
-    ~contents_of_boxed_number:(fun (ty_value : TG.head_of_kind_value) ->
-      match ty_value with
-      | Boxed_nativeint ty -> Some ty
-      | Variant _ | Boxed_float _ | Boxed_int32 _ | Boxed_int64 _ | Closures _
+      | Boxed_float32 (ty, _) -> Some ty
+      | Variant _ | Mutable_block _ | Boxed_float _ | Boxed_int32 _
+      | Boxed_int64 _ | Boxed_vec128 _ | Boxed_nativeint _ | Closures _
       | String _ | Array _ ->
         None)
 
-let[@inline] prove_block_field_simple_aux env ~min_name_mode t get_field :
-    Simple.t proof =
-  let wrong_kind () =
-    Misc.fatal_errorf "Kind error: expected [Value]:@ %a" TG.print t
-  in
-  match expand_head env t with
-  | Value (Ok (Variant { immediates; blocks; is_unique = _ })) -> begin
-    match immediates with
+let meet_boxed_float_containing_simple =
+  meet_boxed_number_containing_simple
+    ~contents_of_boxed_number:(fun (ty_value : TG.head_of_kind_value_non_null)
+                              ->
+      match ty_value with
+      | Boxed_float (ty, _) -> Some ty
+      | Variant _ | Mutable_block _ | Boxed_float32 _ | Boxed_int32 _
+      | Boxed_int64 _ | Boxed_vec128 _ | Boxed_nativeint _ | Closures _
+      | String _ | Array _ ->
+        None)
+
+let meet_boxed_int32_containing_simple =
+  meet_boxed_number_containing_simple
+    ~contents_of_boxed_number:(fun (ty_value : TG.head_of_kind_value_non_null)
+                              ->
+      match ty_value with
+      | Boxed_int32 (ty, _) -> Some ty
+      | Variant _ | Mutable_block _ | Boxed_float _ | Boxed_float32 _
+      | Boxed_int64 _ | Boxed_vec128 _ | Boxed_nativeint _ | Closures _
+      | String _ | Array _ ->
+        None)
+
+let meet_boxed_int64_containing_simple =
+  meet_boxed_number_containing_simple
+    ~contents_of_boxed_number:(fun (ty_value : TG.head_of_kind_value_non_null)
+                              ->
+      match ty_value with
+      | Boxed_int64 (ty, _) -> Some ty
+      | Variant _ | Mutable_block _ | Boxed_float _ | Boxed_float32 _
+      | Boxed_int32 _ | Boxed_vec128 _ | Boxed_nativeint _ | Closures _
+      | String _ | Array _ ->
+        None)
+
+let meet_boxed_nativeint_containing_simple =
+  meet_boxed_number_containing_simple
+    ~contents_of_boxed_number:(fun (ty_value : TG.head_of_kind_value_non_null)
+                              ->
+      match ty_value with
+      | Boxed_nativeint (ty, _) -> Some ty
+      | Variant _ | Mutable_block _ | Boxed_float _ | Boxed_float32 _
+      | Boxed_int32 _ | Boxed_vec128 _ | Boxed_int64 _ | Closures _ | String _
+      | Array _ ->
+        None)
+
+let meet_boxed_vec128_containing_simple =
+  meet_boxed_number_containing_simple
+    ~contents_of_boxed_number:(fun (ty_value : TG.head_of_kind_value_non_null)
+                              ->
+      match ty_value with
+      | Boxed_vec128 (ty, _) -> Some ty
+      | Variant _ | Mutable_block _ | Boxed_float _ | Boxed_float32 _
+      | Boxed_int32 _ | Boxed_nativeint _ | Boxed_int64 _ | Closures _
+      | String _ | Array _ ->
+        None)
+
+let meet_block_field_simple_value ~min_name_mode ~field_kind field_index env
+    (value_head : TG.head_of_kind_value_non_null) : Simple.t generic_proof =
+  match value_head with
+  | Variant { immediates = _; blocks; extensions = _; is_unique = _ } -> (
+    match blocks with
     | Unknown -> Unknown
-    | Known imms -> begin
-      match blocks with
-      | Unknown -> Unknown
-      | Known blocks -> (
-        if TG.Row_like_for_blocks.is_bottom blocks
-        then Invalid
-        else if not (TG.is_obviously_bottom imms)
-        then Unknown
-        else
-          match (get_field blocks : _ Or_unknown_or_bottom.t) with
-          | Bottom -> Invalid
-          | Unknown -> Unknown
-          | Ok ty -> begin
+    | Known blocks -> (
+      if TG.Row_like_for_blocks.is_bottom blocks
+      then Invalid
+      else
+        match
+          (TG.Row_like_for_blocks.get_field blocks field_index
+            : _ Or_unknown_or_bottom.t)
+        with
+        | Bottom -> Invalid
+        | Unknown -> Unknown
+        | Ok ty -> (
+          if (* It's more straightforward to check the kind of [ty] instead of
+                examining the row-like structure directly. *)
+             not (Flambda_kind.equal (TG.kind ty) field_kind)
+          then Invalid
+          else
             match TG.get_alias_exn ty with
-            | simple -> begin
+            | simple -> (
               match TE.get_canonical_simple_exn env ~min_name_mode simple with
               | simple -> Proved simple
-              | exception Not_found -> Unknown
-            end
-            | exception Not_found -> Unknown
-          end)
-    end
-  end
-  | Value (Ok _) -> Invalid
-  | Value Unknown -> Unknown
-  | Value Bottom -> Invalid
-  | Naked_immediate _ | Naked_float _ | Naked_int32 _ | Naked_int64 _
-  | Naked_nativeint _ | Rec_info _ ->
-    wrong_kind ()
+              | exception Not_found -> Unknown)
+            | exception Not_found -> Unknown)))
+  | Mutable_block _ -> Unknown
+  | Boxed_float _ | Boxed_float32 _ | Boxed_int32 _ | Boxed_nativeint _
+  | Boxed_int64 _ | Boxed_vec128 _ | Closures _ | String _ | Array _ ->
+    Invalid
 
-let prove_block_field_simple env ~min_name_mode t field_index =
-  let[@inline] get blocks =
-    TG.Row_like_for_blocks.get_field blocks field_index
-  in
-  (prove_block_field_simple_aux [@inlined]) env ~min_name_mode t get
+let meet_block_field_simple env ~min_name_mode ~field_kind t field_index =
+  gen_value_to_meet
+    (meet_block_field_simple_value ~min_name_mode ~field_kind field_index)
+    env t
 
-let prove_variant_field_simple env ~min_name_mode t variant_tag field_index =
-  let[@inline] get blocks =
-    TG.Row_like_for_blocks.get_variant_field blocks variant_tag field_index
-  in
-  (prove_block_field_simple_aux [@inlined]) env ~min_name_mode t get
-
-let prove_select_closure_simple env ~min_name_mode t closure_id : Simple.t proof
-    =
-  let wrong_kind () =
-    Misc.fatal_errorf "Kind error: expected [Value]:@ %a" TG.print t
-  in
-  match expand_head env t with
-  | Value (Ok (Closures { by_closure_id })) -> (
-    match TG.Row_like_for_closures.get_closure by_closure_id closure_id with
+let meet_project_function_slot_simple_value ~min_name_mode function_slot env
+    (value_head : TG.head_of_kind_value_non_null) : Simple.t generic_proof =
+  match value_head with
+  | Closures { by_function_slot; alloc_mode = _ } -> (
+    match
+      TG.Row_like_for_closures.get_closure by_function_slot function_slot
+    with
     | Unknown -> Unknown
-    | Known ty -> begin
+    | Known ty -> (
       match TG.get_alias_exn ty with
-      | simple -> begin
+      | simple -> (
         match TE.get_canonical_simple_exn env ~min_name_mode simple with
         | simple -> Proved simple
-        | exception Not_found -> Unknown
-      end
-      | exception Not_found -> Unknown
-    end)
-  | Value (Ok _) -> Invalid
-  | Value Unknown -> Unknown
-  | Value Bottom -> Invalid
-  | Naked_immediate _ | Naked_float _ | Naked_int32 _ | Naked_int64 _
-  | Naked_nativeint _ | Rec_info _ ->
-    wrong_kind ()
+        | exception Not_found -> Unknown)
+      | exception Not_found -> Unknown))
+  | Variant _ | Mutable_block _ | Boxed_float _ | Boxed_float32 _
+  | Boxed_int32 _ | Boxed_nativeint _ | Boxed_int64 _ | Boxed_vec128 _
+  | String _ | Array _ ->
+    Invalid
 
-let prove_project_var_simple env ~min_name_mode t env_var : Simple.t proof =
-  let wrong_kind () =
-    Misc.fatal_errorf "Kind error: expected [Value]:@ %a" TG.print t
-  in
-  match expand_head env t with
-  | Value (Ok (Closures { by_closure_id })) -> (
-    match TG.Row_like_for_closures.get_env_var by_closure_id env_var with
+let meet_project_function_slot_simple env ~min_name_mode t function_slot =
+  gen_value_to_meet
+    (meet_project_function_slot_simple_value ~min_name_mode function_slot)
+    env t
+
+let meet_project_value_slot_simple_value ~min_name_mode value_slot env
+    (value_head : TG.head_of_kind_value_non_null) : Simple.t generic_proof =
+  match value_head with
+  | Closures { by_function_slot; alloc_mode = _ } -> (
+    match TG.Row_like_for_closures.get_env_var by_function_slot value_slot with
     | Unknown -> Unknown
-    | Known ty -> begin
-      match TG.get_alias_exn ty with
-      | simple -> begin
-        match TE.get_canonical_simple_exn env ~min_name_mode simple with
-        | simple -> Proved simple
-        | exception Not_found -> Unknown
-      end
-      | exception Not_found -> Unknown
-    end)
-  | Value (Ok _) -> Invalid
-  | Value Unknown -> Unknown
-  | Value Bottom -> Invalid
-  | Naked_immediate _ | Naked_float _ | Naked_int32 _ | Naked_int64 _
-  | Naked_nativeint _ | Rec_info _ ->
-    wrong_kind ()
+    | Known ty -> (
+      if (* It's more straightforward to check the kind of [ty] instead of
+            examining the row-like structure directly. *)
+         not
+           (Flambda_kind.equal (TG.kind ty)
+              (Value_slot.kind value_slot |> Flambda_kind.With_subkind.kind))
+      then Invalid
+      else
+        match TG.get_alias_exn ty with
+        | simple -> (
+          match TE.get_canonical_simple_exn env ~min_name_mode simple with
+          | simple -> Proved simple
+          | exception Not_found -> Unknown)
+        | exception Not_found -> Unknown))
+  | Variant _ | Mutable_block _ | Boxed_float _ | Boxed_float32 _
+  | Boxed_int32 _ | Boxed_nativeint _ | Boxed_int64 _ | Boxed_vec128 _
+  | String _ | Array _ ->
+    Invalid
 
-let prove_rec_info env t : Rec_info_expr.t proof =
-  let wrong_kind () =
-    Misc.fatal_errorf "Kind error: expected [Rec_info]:@ %a" TG.print t
-  in
+let meet_project_value_slot_simple env ~min_name_mode t value_slot =
+  gen_value_to_meet
+    (meet_project_value_slot_simple_value ~min_name_mode value_slot)
+    env t
+
+let meet_rec_info env t : Rec_info_expr.t meet_shortcut =
   match expand_head env t with
-  | Rec_info (Ok rec_info_expr) -> Proved rec_info_expr
-  | Rec_info Unknown -> Unknown
+  | Rec_info (Ok rec_info_expr) -> Known_result rec_info_expr
+  | Rec_info Unknown -> Need_meet
   | Rec_info Bottom -> Invalid
-  | Value _ | Naked_immediate _ | Naked_float _ | Naked_int32 _ | Naked_int64 _
-  | Naked_nativeint _ ->
-    wrong_kind ()
+  | Value _ | Naked_immediate _ | Naked_float _ | Naked_float32 _
+  | Naked_int32 _ | Naked_int64 _ | Naked_vec128 _ | Naked_nativeint _
+  | Region _ ->
+    wrong_kind "Rec_info" t
+
+let prove_alloc_mode_of_boxed_number_value _env
+    (value_head : TG.head_of_kind_value_non_null) :
+    Alloc_mode.For_types.t generic_proof =
+  match value_head with
+  | Boxed_float32 (_, alloc_mode)
+  | Boxed_float (_, alloc_mode)
+  | Boxed_int32 (_, alloc_mode)
+  | Boxed_int64 (_, alloc_mode)
+  | Boxed_nativeint (_, alloc_mode)
+  | Boxed_vec128 (_, alloc_mode) ->
+    Proved alloc_mode
+  | Variant _ | Mutable_block _ | String _ | Array _ | Closures _ -> Unknown
+
+let prove_alloc_mode_of_boxed_number env t =
+  gen_value_to_proof prove_alloc_mode_of_boxed_number_value env t
+
+let never_holds_locally_allocated_values env var : _ proof_of_property =
+  match TE.find_or_missing env (Name.var var) with
+  | None -> Unknown
+  | Some ty -> (
+    match expand_head env ty with
+    | Value (Ok { non_null = Unknown | Bottom; _ }) | Value (Unknown | Bottom)
+      ->
+      Unknown
+    | Value (Ok { non_null = Ok value_head; _ }) -> (
+      match value_head with
+      | Variant { blocks; _ } -> (
+        match blocks with
+        | Unknown -> Unknown
+        | Known blocks -> (
+          if TG.Row_like_for_blocks.is_bottom blocks
+          then Proved ()
+          else
+            match blocks.alloc_mode with
+            | Heap -> Proved ()
+            | Local | Heap_or_local -> Unknown))
+      | Boxed_float32 (_, alloc_mode)
+      | Boxed_float (_, alloc_mode)
+      | Boxed_int32 (_, alloc_mode)
+      | Boxed_int64 (_, alloc_mode)
+      | Boxed_nativeint (_, alloc_mode)
+      | Boxed_vec128 (_, alloc_mode)
+      | Mutable_block { alloc_mode }
+      | Closures { alloc_mode; _ }
+      | Array { alloc_mode; _ } -> (
+        match alloc_mode with
+        | Heap -> Proved ()
+        | Local | Heap_or_local -> Unknown)
+      | String _ -> Proved ())
+    | Naked_immediate _ | Naked_float _ | Naked_float32 _ | Naked_int32 _
+    | Naked_int64 _ | Naked_vec128 _ | Naked_nativeint _ | Rec_info _ | Region _
+      ->
+      Proved ())
+
+let prove_physical_equality env t1 t2 =
+  let incompatible_naked_numbers t1 t2 =
+    match expand_head env t1, expand_head env t2 with
+    | Naked_float32 (Ok s1), Naked_float32 (Ok s2) ->
+      let module FS = Numeric_types.Float32_by_bit_pattern.Set in
+      FS.is_empty (FS.inter (s1 :> FS.t) (s2 :> FS.t))
+    | Naked_float (Ok s1), Naked_float (Ok s2) ->
+      let module FS = Numeric_types.Float_by_bit_pattern.Set in
+      FS.is_empty (FS.inter (s1 :> FS.t) (s2 :> FS.t))
+    | Naked_int32 (Ok s1), Naked_int32 (Ok s2) ->
+      let module IS = Numeric_types.Int32.Set in
+      IS.is_empty (IS.inter (s1 :> IS.t) (s2 :> IS.t))
+    | Naked_int64 (Ok s1), Naked_int64 (Ok s2) ->
+      let module IS = Numeric_types.Int64.Set in
+      IS.is_empty (IS.inter (s1 :> IS.t) (s2 :> IS.t))
+    | Naked_nativeint (Ok s1), Naked_nativeint (Ok s2) ->
+      let module IS = Targetint_32_64.Set in
+      IS.is_empty (IS.inter (s1 :> IS.t) (s2 :> IS.t))
+    | Naked_vec128 (Ok s1), Naked_vec128 (Ok s2) ->
+      let module IS = Vector_types.Vec128.Bit_pattern.Set in
+      IS.is_empty (IS.inter (s1 :> IS.t) (s2 :> IS.t))
+    | ( ( Naked_float _ | Naked_float32 _ | Naked_int32 _ | Naked_int64 _
+        | Naked_nativeint _ | Naked_vec128 _ | Value _ | Naked_immediate _
+        | Region _ | Rec_info _ ),
+        _ ) ->
+      false
+  in
+  let check_heads () : _ proof_of_property =
+    match expand_head env t1, expand_head env t2 with
+    | ( ( Naked_immediate _ | Naked_float _ | Naked_float32 _ | Naked_int32 _
+        | Naked_int64 _ | Naked_vec128 _ | Naked_nativeint _ | Rec_info _
+        | Region _ ),
+        _ ) ->
+      wrong_kind "Value" t1
+    | ( _,
+        ( Naked_immediate _ | Naked_float _ | Naked_float32 _ | Naked_int32 _
+        | Naked_int64 _ | Naked_vec128 _ | Naked_nativeint _ | Rec_info _
+        | Region _ ) ) ->
+      wrong_kind "Value" t2
+    | Value (Unknown | Bottom), _ | _, Value (Unknown | Bottom) -> Unknown
+    | Value (Ok head1), Value (Ok head2) -> (
+      match head1, head2 with
+      | ( { is_null = Maybe_null; non_null = Bottom },
+          { is_null = Maybe_null; non_null = Bottom } ) ->
+        (* Null is physically equal to Null *)
+        Proved true
+      | { is_null = Maybe_null; _ }, _ | _, { is_null = Maybe_null; _ } ->
+        Unknown
+      | { is_null = Not_null; non_null = Unknown | Bottom }, _
+      | _, { is_null = Not_null; non_null = Unknown | Bottom } ->
+        Unknown
+      | ( { is_null = Not_null; non_null = Ok head1 },
+          { is_null = Not_null; non_null = Ok head2 } ) -> (
+        match head1, head2 with
+        (* Basic cases:
+         * similar heads -> Unknown
+         * incompatible contents -> Proved false
+         *)
+        | Boxed_float (t1, _), Boxed_float (t2, _) ->
+          if incompatible_naked_numbers t1 t2 then Proved false else Unknown
+        | Boxed_float32 (t1, _), Boxed_float32 (t2, _) ->
+          if incompatible_naked_numbers t1 t2 then Proved false else Unknown
+        | Boxed_int32 (t1, _), Boxed_int32 (t2, _) ->
+          if incompatible_naked_numbers t1 t2 then Proved false else Unknown
+        | Boxed_int64 (t1, _), Boxed_int64 (t2, _) ->
+          if incompatible_naked_numbers t1 t2 then Proved false else Unknown
+        | Boxed_nativeint (t1, _), Boxed_nativeint (t2, _) ->
+          if incompatible_naked_numbers t1 t2 then Proved false else Unknown
+        | Boxed_vec128 (t1, _), Boxed_vec128 (t2, _) ->
+          if incompatible_naked_numbers t1 t2 then Proved false else Unknown
+        | Closures _, Closures _ -> Unknown
+        | String s1, String s2 ->
+          let module SS = String_info.Set in
+          if SS.is_empty (SS.inter s1 s2) then Proved false else Unknown
+        (* Immediates and allocated values -> Proved false *)
+        | ( Variant
+              { immediates = _;
+                blocks = Known blocks;
+                extensions = _;
+                is_unique = _
+              },
+            ( Mutable_block _ | Boxed_float _ | Boxed_float32 _ | Boxed_int32 _
+            | Boxed_int64 _ | Boxed_vec128 _ | Boxed_nativeint _ | Closures _
+            | String _ | Array _ ) )
+        | ( ( Mutable_block _ | Boxed_float _ | Boxed_float32 _ | Boxed_int32 _
+            | Boxed_int64 _ | Boxed_vec128 _ | Boxed_nativeint _ | Closures _
+            | String _ | Array _ ),
+            Variant
+              { immediates = _;
+                blocks = Known blocks;
+                extensions = _;
+                is_unique = _
+              } )
+          when TG.Row_like_for_blocks.is_bottom blocks ->
+          Proved false
+        (* Variants:
+         * incompatible immediates and incompatible block tags -> Proved false
+         * same immediate on both sides, no blocks -> Proved true
+         *)
+        | ( Variant
+              { immediates = immediates1;
+                blocks = blocks1;
+                extensions = _;
+                is_unique = _
+              },
+            Variant
+              { immediates = immediates2;
+                blocks = blocks2;
+                extensions = _;
+                is_unique = _
+              } ) -> (
+          match immediates1, immediates2, blocks1, blocks2 with
+          | Known imms, _, _, Known blocks
+            when TG.is_obviously_bottom imms
+                 && TG.Row_like_for_blocks.is_bottom blocks ->
+            Proved false
+          | _, Known imms, Known blocks, _
+            when TG.is_obviously_bottom imms
+                 && TG.Row_like_for_blocks.is_bottom blocks ->
+            Proved false
+          | Known imms1, Known imms2, Known blocks1, Known blocks2 -> (
+            let immediates_equality : _ generic_proof =
+              (* Note: the proof we're returning here has slightly unusual
+                 semantics. [Invalid] is only returned if neither input can be
+                 an immediate. [Proved false] means that the inputs cannot be
+                 both immediates and equal. [Proved true] means that *if* both
+                 inputs are immediates, then they are equal.
+
+                 This is what allows us to combine correctly with the property
+                 on blocks to return a precise enough result. *)
+              match
+                ( prove_naked_immediates_generic env imms1,
+                  prove_naked_immediates_generic env imms2 )
+              with
+              | Invalid, Invalid -> Invalid
+              | Invalid, _ | _, Invalid -> Proved false
+              | Unknown, _ | _, Unknown -> Unknown
+              | Proved imms1, Proved imms2 -> (
+                let module S = Targetint_31_63.Set in
+                if S.is_empty (S.inter imms1 imms2)
+                then Proved false
+                else
+                  match S.get_singleton imms1, S.get_singleton imms2 with
+                  | None, _ | _, None -> Unknown
+                  | Some imm1, Some imm2 ->
+                    (* We've ruled out the empty intersection case, so the
+                       numbers have to be equal *)
+                    assert (Targetint_31_63.equal imm1 imm2);
+                    Proved true)
+            in
+            let blocks_equality : _ generic_proof =
+              (* Same semantics as in the immediates case *)
+              let is_bottom1 = TG.Row_like_for_blocks.is_bottom blocks1 in
+              let is_bottom2 = TG.Row_like_for_blocks.is_bottom blocks2 in
+              if is_bottom1 && is_bottom2
+              then Invalid
+              else if is_bottom1 || is_bottom2
+              then Proved false
+              else
+                match
+                  ( TG.Row_like_for_blocks.get_singleton blocks1,
+                    TG.Row_like_for_blocks.get_singleton blocks2 )
+                with
+                | None, _ | _, None -> Unknown
+                | ( Some (tag1, shape1, size1, _fields1, _alloc_mode1),
+                    Some (tag2, shape2, size2, _fields2, _alloc_mode2) ) ->
+                  if Tag.equal tag1 tag2
+                     && Targetint_31_63.equal size1 size2
+                     && K.Block_shape.equal shape1 shape2
+                  then
+                    (* CR vlaviron and chambart: We could add a special case for
+                       extension constructors, to try to remove dead branches in
+                       try...with handlers *)
+                    Unknown
+                  else
+                    (* Different tags, shapes or sizes: the blocks can't be
+                       physically equal. *)
+                    Proved false
+            in
+            (* Note: the [Proved true, Proved true] case cannot be converted to
+               [Proved true] (see comment above on semantics) *)
+            match immediates_equality, blocks_equality with
+            | Proved b, Invalid | Invalid, Proved b -> Proved b
+            | Proved false, Proved false -> Proved false
+            | _, _ -> Unknown)
+          | _, _, _, _ -> Unknown)
+        (* Boxed numbers with non-numbers or different kinds -> Proved *)
+        | ( Boxed_float _,
+            ( Variant _ | Mutable_block _ | Boxed_float32 _ | Boxed_int32 _
+            | Boxed_int64 _ | Boxed_vec128 _ | Boxed_nativeint _ | Closures _
+            | String _ | Array _ ) )
+        | ( ( Variant _ | Mutable_block _ | Boxed_float32 _ | Boxed_int32 _
+            | Boxed_int64 _ | Boxed_vec128 _ | Boxed_nativeint _ | Closures _
+            | String _ | Array _ ),
+            Boxed_float _ )
+        | ( Boxed_int32 _,
+            ( Variant _ | Mutable_block _ | Boxed_float32 _ | Boxed_int64 _
+            | Boxed_nativeint _ | Boxed_vec128 _ | Closures _ | String _
+            | Array _ ) )
+        | ( ( Variant _ | Mutable_block _ | Boxed_float32 _ | Boxed_int64 _
+            | Boxed_nativeint _ | Boxed_vec128 _ | Closures _ | String _
+            | Array _ ),
+            Boxed_int32 _ )
+        | ( Boxed_int64 _,
+            ( Variant _ | Mutable_block _ | Boxed_float32 _ | Boxed_nativeint _
+            | Closures _ | Boxed_vec128 _ | String _ | Array _ ) )
+        | ( ( Variant _ | Mutable_block _ | Boxed_float32 _ | Boxed_nativeint _
+            | Closures _ | Boxed_vec128 _ | String _ | Array _ ),
+            Boxed_int64 _ )
+        | ( Boxed_vec128 _,
+            ( Variant _ | Mutable_block _ | Boxed_float32 _ | Boxed_nativeint _
+            | Closures _ | String _ | Array _ ) )
+        | ( ( Variant _ | Mutable_block _ | Boxed_float32 _ | Boxed_nativeint _
+            | Closures _ | String _ | Array _ ),
+            Boxed_vec128 _ )
+        | ( Boxed_nativeint _,
+            ( Variant _ | Mutable_block _ | Boxed_float32 _ | Closures _
+            | String _ | Array _ ) )
+        | ( ( Variant _ | Mutable_block _ | Boxed_float32 _ | Closures _
+            | String _ | Array _ ),
+            Boxed_nativeint _ )
+        | ( Boxed_float32 _,
+            (Variant _ | Mutable_block _ | Closures _ | String _ | Array _) )
+        | ( (Variant _ | Mutable_block _ | Closures _ | String _ | Array _),
+            Boxed_float32 _ ) ->
+          Proved false
+        (* Closures and non-closures -> Proved *)
+        | Closures _, (Variant _ | Mutable_block _ | String _ | Array _)
+        | (Variant _ | Mutable_block _ | String _ | Array _), Closures _ ->
+          Proved false
+        (* Strings and non-strings -> Proved *)
+        | String _, (Variant _ | Mutable_block _ | Array _)
+        | (Variant _ | Mutable_block _ | Array _), String _ ->
+          Proved false
+        (* Due to various hacks in existing code (including in the compiler), it
+           would be dangerous to assume that variants, mutable blocks and arrays
+           cannot alias to each other *)
+        | ( (Variant _ | Mutable_block _ | Array _),
+            (Variant _ | Mutable_block _ | Array _) ) ->
+          Unknown))
+  in
+  match TG.get_alias_opt t1, TG.get_alias_opt t2 with
+  | Some s1, Some s2 ->
+    let const c1 =
+      Simple.pattern_match' s2
+        ~const:(fun c2 : _ proof_of_property ->
+          if Reg_width_const.equal c1 c2 then Proved true else Proved false)
+        ~symbol:(fun _ ~coercion:_ : _ proof_of_property -> Proved false)
+        ~var:(fun _ ~coercion:_ -> check_heads ())
+    in
+    let symbol sym1 ~coercion:_ =
+      Simple.pattern_match' s2
+        ~const:(fun _ : _ proof_of_property -> Proved false)
+        ~symbol:(fun sym2 ~coercion:_ : _ proof_of_property ->
+          if Symbol.equal sym1 sym2 then Proved true else Proved false)
+        ~var:(fun _ ~coercion:_ -> check_heads ())
+    in
+    let var var1 ~coercion:_ =
+      Simple.pattern_match' s2
+        ~const:(fun _ -> check_heads ())
+        ~symbol:(fun _ ~coercion:_ -> check_heads ())
+        ~var:(fun var2 ~coercion:_ : _ proof_of_property ->
+          if Variable.equal var1 var2 then Proved true else check_heads ())
+    in
+    Simple.pattern_match' s1 ~const ~symbol ~var
+  | None, Some _ | Some _, None | None, None -> check_heads ()

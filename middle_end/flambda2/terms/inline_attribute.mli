@@ -16,8 +16,6 @@
 
 (** Function declaration (not call site) inlining annotations. *)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 type t =
   | Always_inline
   | Available_inline
@@ -32,3 +30,5 @@ val equal : t -> t -> bool
 val is_default : t -> bool
 
 val number_of_unrolls : t -> int
+
+val from_lambda : Lambda.inline_attribute -> t

@@ -18,8 +18,6 @@
     simplifier. Definitions of the constants themselves are not kept when not
     rebuilding terms, but some of the metadata is. *)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 open! Flambda
 
 type t
@@ -30,24 +28,9 @@ val print : Format.formatter -> t -> unit
 
 val create_code :
   Are_rebuilding_terms.t ->
-  Code_id.t ->
   params_and_body:Rebuilt_expr.Function_params_and_body.t ->
   free_names_of_params_and_body:Name_occurrences.t ->
-  newer_version_of:Code_id.t option ->
-  params_arity:Flambda_arity.With_subkinds.t ->
-  result_arity:Flambda_arity.With_subkinds.t ->
-  result_types:Result_types.t ->
-  stub:bool ->
-  inline:Inline_attribute.t ->
-  is_a_functor:bool ->
-  recursive:Recursive.t ->
-  cost_metrics:Cost_metrics.t ->
-  inlining_arguments:Inlining_arguments.t ->
-  dbg:Debuginfo.t ->
-  is_tupled:bool ->
-  is_my_closure_used:bool ->
-  inlining_decision:Function_decl_inlining_decision_type.t ->
-  t
+  (t * Code.t option) Code_metadata.create_type
 
 (* This function should be used when a [Code.t] is already in hand, e.g. from
    the input term to the simplifier, rather than when one needs to be
@@ -61,7 +44,13 @@ val create_block :
   Are_rebuilding_terms.t ->
   Tag.Scannable.t ->
   Mutability.t ->
-  fields:Field_of_static_block.t list ->
+  Flambda_kind.Scannable_block_shape.t ->
+  fields:Simple.With_debuginfo.t list ->
+  t
+
+val create_boxed_float32 :
+  Are_rebuilding_terms.t ->
+  Numeric_types.Float32_by_bit_pattern.t Or_variable.t ->
   t
 
 val create_boxed_float :
@@ -76,6 +65,9 @@ val create_boxed_int64 : Are_rebuilding_terms.t -> Int64.t Or_variable.t -> t
 val create_boxed_nativeint :
   Are_rebuilding_terms.t -> Targetint_32_64.t Or_variable.t -> t
 
+val create_boxed_vec128 :
+  Are_rebuilding_terms.t -> Vector_types.Vec128.Bit_pattern.t Or_variable.t -> t
+
 val create_immutable_float_block :
   Are_rebuilding_terms.t ->
   Numeric_types.Float_by_bit_pattern.t Or_variable.t list ->
@@ -86,7 +78,29 @@ val create_immutable_float_array :
   Numeric_types.Float_by_bit_pattern.t Or_variable.t list ->
   t
 
-val create_empty_array : Are_rebuilding_terms.t -> t
+val create_immutable_float32_array :
+  Are_rebuilding_terms.t ->
+  Numeric_types.Float32_by_bit_pattern.t Or_variable.t list ->
+  t
+
+val create_immutable_int32_array :
+  Are_rebuilding_terms.t -> Int32.t Or_variable.t list -> t
+
+val create_immutable_int64_array :
+  Are_rebuilding_terms.t -> Int64.t Or_variable.t list -> t
+
+val create_immutable_nativeint_array :
+  Are_rebuilding_terms.t -> Targetint_32_64.t Or_variable.t list -> t
+
+val create_immutable_vec128_array :
+  Are_rebuilding_terms.t ->
+  Vector_types.Vec128.Bit_pattern.t Or_variable.t list ->
+  t
+
+val create_immutable_value_array :
+  Are_rebuilding_terms.t -> Simple.With_debuginfo.t list -> t
+
+val create_empty_array : Are_rebuilding_terms.t -> Empty_array_kind.t -> t
 
 val create_mutable_string : Are_rebuilding_terms.t -> initial_value:string -> t
 
@@ -103,8 +117,6 @@ val is_set_of_closures : t -> bool
 val is_code : t -> bool
 
 val is_fully_static : t -> bool
-
-val make_all_code_deleted : t -> t
 
 val make_code_deleted : t -> if_code_id_is_member_of:Code_id.Set.t -> t
 
@@ -142,6 +154,8 @@ module Group : sig
   (** [map] and [fold_left] should be used in preference, to avoid allocating
       intermediate lists. *)
   val to_list : t -> rebuilt_static_const list
+
+  val add : rebuilt_static_const -> t -> t
 
   val concat : t -> t -> t
 end

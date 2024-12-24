@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 module CUE = Continuation_uses_env
 module DE = Downwards_env
 module LCS = Lifted_constant_state
@@ -25,61 +23,88 @@ type t =
   { denv : DE.t;
     continuation_uses_env : CUE.t;
     shareable_constants : Symbol.t Static_const.Map.t;
-    used_closure_vars : Name_occurrences.t;
+    used_value_slots : Name_occurrences.t;
     lifted_constants : LCS.t;
-    data_flow : Data_flow.t;
+    flow_acc : Flow.Acc.t;
     demoted_exn_handlers : Continuation.Set.t;
     code_ids_to_remember : Code_id.Set.t;
-    closure_offsets : Closure_offsets.t Or_unknown.t
+    code_ids_to_never_delete : Code_id.Set.t;
+    code_ids_never_simplified : Code_id.Set.t;
+    slot_offsets : Slot_offsets.t Code_id.Map.t;
+    debuginfo_rewrites : Debuginfo.t Simple.Map.t;
+    are_lifting_conts : Are_lifting_conts.t;
+    lifted_continuations : (DE.t * Original_handlers.t) list;
+    (* head of the list is the innermost continuation being lifted *)
+    continuation_lifting_budget : int
   }
 
+let print_lifted_cont ppf (denv, original_handlers) =
+  Format.fprintf ppf
+    "@[<hov 1>(@[<hov 1>(denv %a)@]@ @[<hov 1>(original_handlers %a)@])@]"
+    DE.print denv Original_handlers.print original_handlers
+
 let [@ocamlformat "disable"] print ppf
-      { denv; continuation_uses_env; shareable_constants; used_closure_vars;
-        lifted_constants; data_flow; demoted_exn_handlers; code_ids_to_remember;
-        closure_offsets } =
+      { denv; continuation_uses_env; shareable_constants; used_value_slots;
+        lifted_constants; flow_acc; demoted_exn_handlers; code_ids_to_remember;
+        code_ids_to_never_delete; code_ids_never_simplified; slot_offsets; debuginfo_rewrites;
+        are_lifting_conts; lifted_continuations; continuation_lifting_budget; } =
   Format.fprintf ppf "@[<hov 1>(\
       @[<hov 1>(denv@ %a)@]@ \
       @[<hov 1>(continuation_uses_env@ %a)@]@ \
       @[<hov 1>(shareable_constants@ %a)@]@ \
-      @[<hov 1>(used_closure_vars@ %a)@]@ \
+      @[<hov 1>(used_value_slots@ %a)@]@ \
       @[<hov 1>(lifted_constant_state@ %a)@]@ \
-      @[<hov 1>(data_flow@ %a)@]@ \
+      @[<hov 1>(flow_acc@ %a)@]@ \
       @[<hov 1>(demoted_exn_handlers@ %a)@]@ \
       @[<hov 1>(code_ids_to_remember@ %a)@]@ \
-      @[<hov 1>(closure_offsets@ %a)@]\
+      @[<hov 1>(code_ids_to_never_delete@ %a)@]@ \
+      @[<hov 1>(code_ids_never_simplified@ %a)@]@ \
+      @[<hov 1>(slot_offsets@ %a)@ \
+      @[<hov 1>(debuginfo_rewrites@ %a)@]@ \
+      @[<hov 1>(are_lifting_conts@ %a)@]@ \
+      @[<hov 1>(lifted_continuations@ %a)@]@ \
+      @[<hov 1>(continuation_lifting_budget %d)@]\
       )@]"
     DE.print denv
     CUE.print continuation_uses_env
     (Static_const.Map.print Symbol.print) shareable_constants
-    Name_occurrences.print used_closure_vars
+    Name_occurrences.print used_value_slots
     LCS.print lifted_constants
-    Data_flow.print data_flow
+    Flow.Acc.print flow_acc
     Continuation.Set.print demoted_exn_handlers
     Code_id.Set.print code_ids_to_remember
-    (Or_unknown.print Closure_offsets.print) closure_offsets
+    Code_id.Set.print code_ids_to_never_delete
+    Code_id.Set.print code_ids_never_simplified
+    (Code_id.Map.print Slot_offsets.print) slot_offsets
+    (Simple.Map.print Debuginfo.print_compact) debuginfo_rewrites
+    Are_lifting_conts.print are_lifting_conts
+    (Format.pp_print_list ~pp_sep:Format.pp_print_space
+       print_lifted_cont) lifted_continuations
+    continuation_lifting_budget
 
-let create denv continuation_uses_env ~compute_closure_offsets =
-  let closure_offsets : _ Or_unknown.t =
-    if compute_closure_offsets
-    then Known (Closure_offsets.create ())
-    else Unknown
-  in
+let create denv slot_offsets continuation_uses_env =
   { denv;
     continuation_uses_env;
-    closure_offsets;
+    slot_offsets;
     shareable_constants = Static_const.Map.empty;
-    used_closure_vars = Name_occurrences.empty;
+    used_value_slots = Name_occurrences.empty;
     lifted_constants = LCS.empty;
-    data_flow = Data_flow.empty;
+    flow_acc = Flow.Acc.empty ();
     demoted_exn_handlers = Continuation.Set.empty;
-    code_ids_to_remember = Code_id.Set.empty
+    code_ids_to_remember = Code_id.Set.empty;
+    code_ids_to_never_delete = Code_id.Set.empty;
+    code_ids_never_simplified = Code_id.Set.empty;
+    debuginfo_rewrites = Simple.Map.empty;
+    are_lifting_conts = Are_lifting_conts.no_lifting;
+    lifted_continuations = [];
+    continuation_lifting_budget = Flambda_features.Expert.cont_lifting_budget ()
   }
 
 let denv t = t.denv
 
-let data_flow t = t.data_flow
+let flow_acc t = t.flow_acc
 
-let[@inline always] map_data_flow t ~f = { t with data_flow = f t.data_flow }
+let[@inline always] map_flow_acc t ~f = { t with flow_acc = f t.flow_acc }
 
 let[@inline always] map_denv t ~f = { t with denv = f t.denv }
 
@@ -108,7 +133,7 @@ let continuation_uses_env t = t.continuation_uses_env
 
 let code_age_relation t = TE.code_age_relation (DE.typing_env (denv t))
 
-let with_code_age_relation t code_age_relation =
+let with_code_age_relation t ~code_age_relation =
   let typing_env =
     TE.with_code_age_relation (DE.typing_env (denv t)) code_age_relation
   in
@@ -161,19 +186,19 @@ let with_shareable_constants t ~shareable_constants =
 
 let shareable_constants t = t.shareable_constants
 
-let add_use_of_closure_var t closure_var =
+let add_use_of_value_slot t value_slot =
   { t with
-    used_closure_vars =
-      Name_occurrences.add_closure_var t.used_closure_vars closure_var
-        Name_mode.normal
+    used_value_slots =
+      Name_occurrences.add_value_slot_in_projection t.used_value_slots
+        value_slot Name_mode.normal
   }
 
-let used_closure_vars t = t.used_closure_vars
+let used_value_slots t = t.used_value_slots
 
 let all_continuations_used t =
   CUE.all_continuations_used t.continuation_uses_env
 
-let with_used_closure_vars t ~used_closure_vars = { t with used_closure_vars }
+let with_used_value_slots t ~used_value_slots = { t with used_value_slots }
 
 let add_code_ids_to_remember t code_ids =
   if DE.at_unit_toplevel t.denv
@@ -188,13 +213,29 @@ let code_ids_to_remember t = t.code_ids_to_remember
 let with_code_ids_to_remember t ~code_ids_to_remember =
   { t with code_ids_to_remember }
 
-let set_do_not_rebuild_terms_and_disable_inlining t =
-  { t with denv = DE.set_do_not_rebuild_terms_and_disable_inlining t.denv }
+let add_code_ids_to_never_delete t code_ids =
+  { t with
+    code_ids_to_never_delete =
+      Code_id.Set.union code_ids t.code_ids_to_never_delete
+  }
+
+let code_ids_to_never_delete t = t.code_ids_to_never_delete
+
+let with_code_ids_to_never_delete t ~code_ids_to_never_delete =
+  { t with code_ids_to_never_delete }
+
+let add_code_ids_never_simplified t ~old_code_ids =
+  { t with
+    code_ids_never_simplified =
+      Code_id.Set.union old_code_ids t.code_ids_never_simplified
+  }
+
+let code_ids_never_simplified t = t.code_ids_never_simplified
+
+let with_code_ids_never_simplified t ~code_ids_never_simplified =
+  { t with code_ids_never_simplified }
 
 let are_rebuilding_terms t = DE.are_rebuilding_terms t.denv
-
-let do_not_rebuild_terms t =
-  Are_rebuilding_terms.do_not_rebuild_terms (are_rebuilding_terms t)
 
 let demote_exn_handler t cont =
   { t with
@@ -203,6 +244,57 @@ let demote_exn_handler t cont =
 
 let demoted_exn_handlers t = t.demoted_exn_handlers
 
-let closure_offsets t = t.closure_offsets
+let slot_offsets t = t.slot_offsets
 
-let with_closure_offsets t ~closure_offsets = { t with closure_offsets }
+let with_slot_offsets t ~slot_offsets = { t with slot_offsets }
+
+let find_debuginfo_rewrite t ~bound_to =
+  Simple.Map.find_opt bound_to t.debuginfo_rewrites
+
+let merge_debuginfo_rewrite t ~bound_to dbg =
+  let dbg =
+    match find_debuginfo_rewrite t ~bound_to with
+    | None -> dbg
+    | Some earlier_dbg -> Debuginfo.merge ~into:earlier_dbg dbg
+  in
+  { t with
+    debuginfo_rewrites =
+      Simple.Map.add (* or replace *) bound_to dbg t.debuginfo_rewrites
+  }
+
+let are_lifting_conts t = t.are_lifting_conts
+
+let with_are_lifting_conts t are_lifting_conts = { t with are_lifting_conts }
+
+let get_and_clear_lifted_continuations t =
+  { t with lifted_continuations = [] }, t.lifted_continuations
+
+let add_lifted_continuation denv original_handlers t =
+  { t with
+    lifted_continuations = (denv, original_handlers) :: t.lifted_continuations
+  }
+
+(* Invariant: budget < 0 means no limit on cont lifting *)
+let get_continuation_lifting_budget t =
+  let budget = t.continuation_lifting_budget in
+  if budget < 0 then max_int else budget
+
+let reset_continuation_lifting_budget t =
+  let continuation_lifting_budget =
+    Flambda_features.Expert.cont_lifting_budget ()
+  in
+  { t with continuation_lifting_budget }
+
+let decrease_continuation_lifting_budget t cost =
+  if t.continuation_lifting_budget < 0
+  then t
+  else
+    { t with
+      continuation_lifting_budget = max 0 (t.continuation_lifting_budget - cost)
+    }
+
+let prepare_for_speculative_inlining dacc =
+  let dacc =
+    map_denv ~f:DE.set_do_not_rebuild_terms_and_disable_inlining dacc
+  in
+  with_are_lifting_conts dacc Are_lifting_conts.no_lifting

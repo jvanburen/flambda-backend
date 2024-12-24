@@ -14,24 +14,38 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 (** Dumping and restoring of simplification environment information to and from
     .cmx files. *)
 
+type loader
+
+val create_loader :
+  get_module_info:(Compilation_unit.t -> Flambda_cmx_format.t option) -> loader
+
+val get_imported_names : loader -> unit -> Name.Set.t
+
+val get_imported_code : loader -> unit -> Exported_code.t
+
 val load_cmx_file_contents :
-  get_global_info:
-    (Flambda2_identifiers.Compilation_unit.t -> Flambda_cmx_format.t option) ->
+  loader ->
   Compilation_unit.t ->
-  imported_units:Flambda2_types.Typing_env.t option Compilation_unit.Map.t ref ->
-  imported_names:Name.Set.t ref ->
-  imported_code:Exported_code.t ref ->
-  Flambda2_types.Typing_env.t option
+  Flambda2_types.Typing_env.Serializable.t option
+
+val load_symbol_approx :
+  loader -> Symbol.t -> Code_or_metadata.t Value_approximation.t
 
 val prepare_cmx_file_contents :
   final_typing_env:Flambda2_types.Typing_env.t option ->
   module_symbol:Symbol.t ->
-  used_closure_vars:Var_within_closure.Set.t ->
+  used_value_slots:Value_slot.Set.t ->
   exported_offsets:Exported_offsets.t ->
   Exported_code.t ->
-  Flambda_cmx_format.t option
+  Name_occurrences.t * Flambda_cmx_format.t option
+
+val prepare_cmx_from_approx :
+  approxs:Code_or_metadata.t Value_approximation.t Symbol.Map.t ->
+  module_symbol:Symbol.t ->
+  exported_offsets:Exported_offsets.t ->
+  used_value_slots:Value_slot.Set.t ->
+  Exported_code.t ->
+  Name_occurrences.t * Flambda_cmx_format.t option

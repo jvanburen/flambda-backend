@@ -21,7 +21,12 @@ let compile_file filename =
     let out_name = Filename.chop_extension filename ^ ".s" in
     Emitaux.output_channel := open_out out_name
   end; (* otherwise, stdout *)
-  Compilenv.reset "test";
+  let compilation_unit =
+    Compilation_unit.create Compilation_unit.Prefix.empty
+      ("test" |> Compilation_unit.Name.of_string)
+  in
+  Compilenv.reset compilation_unit;
+  Clflags.cmm_invariants := true;
   Emit.begin_assembly();
   let ic = open_in filename in
   let lb = Lexing.from_channel ic in
@@ -59,7 +64,6 @@ let main() =
      "-S", Arg.Set write_asm_file,
        " Output file to filename.s (default is stdout)";
      "-g", Arg.Set Clflags.debug, "";
-     "-dcfg", Arg.Set Flambda_backend_flags.dump_cfg, "";
      "-dcmm", Arg.Set dump_cmm, "";
      "-dcse", Arg.Set dump_cse, "";
      "-dsel", Arg.Set dump_selection, "";
@@ -73,9 +77,14 @@ let main() =
      "-dscheduling", Arg.Set dump_scheduling, "";
      "-dlinear", Arg.Set dump_linear, "";
      "-dtimings", Arg.Unit (fun () -> profile_columns := [ `Time ]), "";
+     "-dcounters", Arg.Unit (fun () -> profile_columns := [ `Counters ]), "";
+     ( "-dgranularity",
+        Arg.Symbol
+          (Clflags.all_profile_granularity_levels, Clflags.set_profile_granularity),
+        "" );
     ] compile_file usage
 
 let () =
   main ();
-  Profile.print Format.std_formatter !Clflags.profile_columns;
+  Profile.print Format.std_formatter !Clflags.profile_columns ~timings_precision:!Clflags.timings_precision;
   exit 0

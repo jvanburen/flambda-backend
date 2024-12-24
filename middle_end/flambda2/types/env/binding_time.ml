@@ -12,12 +12,10 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 module T = struct
   include Int
 
-  let [@ocamlformat "disable"] print = Numeric_types.Int.print
+  let print = Numeric_types.Int.print
 
   let hash = Hashtbl.hash
 end
@@ -26,9 +24,9 @@ include T
 
 type binding_time = t
 
-module Set = Patricia_tree.Make_set (T)
-module Map = Patricia_tree.Make_map (T) (Set)
-module Tbl = Container_types.Make_tbl (T) (Map)
+module Tree = Patricia_tree.Make (T)
+module Set = Tree.Set
+module Map = Tree.Map
 
 let strictly_earlier (t : t) ~than = t < than
 
@@ -43,19 +41,16 @@ let earliest_var = 3
 let succ (t : t) =
   if t < earliest_var
   then Misc.fatal_error "Cannot increment binding time for symbols"
+  else if t = max_int
+  then Misc.fatal_error "Have run out of binding times"
   else t + 1
-
-(* CR mshinwell: enforce an upper limit on values of type [t] *)
 
 module With_name_mode = struct
   type t = int
 
-  let[@inline always] create binding_time name_mode =
+  let[@inline always] create binding_time (name_mode : Name_mode.t) =
     let name_mode =
-      match Name_mode.descr name_mode with
-      | Normal -> 0
-      | In_types -> 1
-      | Phantom -> 2
+      match name_mode with Normal -> 0 | In_types -> 1 | Phantom -> 2
     in
     (binding_time lsl 2) lor name_mode
 
@@ -83,9 +78,9 @@ module With_name_mode = struct
     else (* Variable out of the allowed scope *)
       Name_mode.in_types
 
-  let [@ocamlformat "disable"] print ppf t =
-    Format.fprintf ppf "(bound at time %d %a)" (binding_time t)
-      Name_mode.print (name_mode t)
+  let print ppf t =
+    Format.fprintf ppf "(bound at time %d %a)" (binding_time t) Name_mode.print
+      (name_mode t)
 
   let equal t1 t2 = t1 = t2
 end

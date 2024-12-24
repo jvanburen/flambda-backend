@@ -19,39 +19,42 @@
 
     The rewrites are actually applied via [Expr_builder]. *)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 type t
 
-type used = private
-  | Used
+type used =
   | Unused
+  | Used
+  | Used_as_invariant
 
 val print : Format.formatter -> t -> unit
 
 (** [extra_args] (and hence [extra_params]) must be given in order: later
     extra-args may refer to earlier extra-args, but not vice-versa. *)
 val create :
-  original_params:Bound_parameter.t list ->
-  used_params:Bound_parameter.Set.t ->
-  extra_params:Bound_parameter.t list ->
-  extra_args:
-    Continuation_extra_params_and_args.Extra_arg.t list
-    Apply_cont_rewrite_id.Map.t ->
-  used_extra_params:Bound_parameter.Set.t ->
+  original_params:Bound_parameters.t ->
+  extra_params_and_args:Continuation_extra_params_and_args.t ->
+  decide_param_usage:(Bound_parameter.t -> used) ->
   t
 
-val original_params : t -> Bound_parameter.t list
-
-val used_params : t -> Bound_parameter.Set.t
-
-val used_extra_params : t -> Bound_parameter.t list
-
-val extra_args :
-  t ->
-  Apply_cont_rewrite_id.t ->
-  (Continuation_extra_params_and_args.Extra_arg.t * used) list
-
-val original_params_arity : t -> Flambda_arity.With_subkinds.t
-
 val does_nothing : t -> bool
+
+val get_used_params : t -> Bound_parameters.t * Bound_parameters.t
+
+val get_unused_params : t -> Bound_parameters.t
+
+val original_params_arity : t -> [> ] Flambda_arity.t
+
+type rewrite_apply_cont_ctx =
+  | Apply_cont
+  | Apply_expr of Simple.t list
+
+val make_rewrite :
+  t ->
+  ctx:rewrite_apply_cont_ctx ->
+  Apply_cont_rewrite_id.t ->
+  Simple.t list ->
+  ((Bound_var.t * Code_size.t * Flambda.Named.t) list * Simple.t list)
+  Or_invalid.t
+
+val rewrite_exn_continuation :
+  t -> Apply_cont_rewrite_id.t -> Exn_continuation.t -> Exn_continuation.t

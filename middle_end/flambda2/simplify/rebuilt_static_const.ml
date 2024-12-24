@@ -14,10 +14,9 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 open! Flambda
 module ART = Are_rebuilding_terms
+module SC = Static_const
 
 type t =
   | Normal of
@@ -54,34 +53,29 @@ let create_normal_non_code const =
       free_names = Static_const.free_names const
     }
 
-let create_code are_rebuilding code_id ~params_and_body
-    ~free_names_of_params_and_body ~newer_version_of ~params_arity ~result_arity
-    ~result_types ~stub ~inline ~is_a_functor ~recursive ~cost_metrics
-    ~inlining_arguments ~dbg ~is_tupled ~is_my_closure_used ~inlining_decision =
+let create_code are_rebuilding ~params_and_body ~free_names_of_params_and_body =
   if ART.do_not_rebuild_terms are_rebuilding
   then
-    let non_constructed_code =
-      Non_constructed_code.create code_id ~free_names_of_params_and_body
-        ~newer_version_of ~params_arity ~result_arity ~result_types ~stub
-        ~inline ~is_a_functor ~recursive ~cost_metrics ~inlining_arguments ~dbg
-        ~is_tupled ~is_my_closure_used ~inlining_decision
-    in
-    Code_not_rebuilt non_constructed_code
+    Code_metadata.createk (fun code_metadata ->
+        ( Code_not_rebuilt
+            (Non_constructed_code.create_with_metadata
+               ~free_names_of_params_and_body ~code_metadata),
+          None ))
   else
     let params_and_body =
       Rebuilt_expr.Function_params_and_body.to_function_params_and_body
         params_and_body are_rebuilding
     in
-    let code =
-      Code.create code_id ~params_and_body ~free_names_of_params_and_body
-        ~newer_version_of ~params_arity ~result_arity ~result_types ~stub
-        ~inline ~is_a_functor ~recursive ~cost_metrics ~inlining_arguments ~dbg
-        ~is_tupled ~is_my_closure_used ~inlining_decision
-    in
-    Normal
-      { const = Static_const_or_code.create_code code;
-        free_names = Code.free_names code
-      }
+    Code_metadata.createk (fun code_metadata ->
+        let code =
+          Code.create_with_metadata ~params_and_body
+            ~free_names_of_params_and_body ~code_metadata
+        in
+        ( Normal
+            { const = Static_const_or_code.create_code code;
+              free_names = Code.free_names code
+            },
+          Some code ))
 
 let create_code' code =
   Normal
@@ -90,46 +84,66 @@ let create_code' code =
     }
 
 let create_set_of_closures are_rebuilding set =
+  (* Even if the set of closures was locally allocated, this allocation is
+     global. This will not cause leaks, as lifted constants are static and
+     therefore only allocated once. *)
+  let set =
+    Set_of_closures.create
+      ~value_slots:(Set_of_closures.value_slots set)
+      Alloc_mode.For_allocations.heap
+      (Set_of_closures.function_decls set)
+  in
   let free_names = Set_of_closures.free_names set in
   if ART.do_not_rebuild_terms are_rebuilding
   then Set_of_closures_not_rebuilt { free_names }
   else
     Normal
-      { const = Static_const_or_code.create_static_const (Set_of_closures set);
+      { const =
+          Static_const_or_code.create_static_const (SC.set_of_closures set);
         free_names
       }
 
-let create_block are_rebuilding tag is_mutable ~fields =
+let free_names_of_fields fields =
+  ListLabels.fold_left fields ~init:Name_occurrences.empty
+    ~f:(fun free_names field ->
+      Name_occurrences.union free_names (Simple.With_debuginfo.free_names field))
+
+let create_block are_rebuilding tag is_mutable shape ~fields =
   if ART.do_not_rebuild_terms are_rebuilding
   then
-    let free_names =
-      ListLabels.fold_left fields ~init:Name_occurrences.empty
-        ~f:(fun free_names field ->
-          Name_occurrences.union free_names
-            (Field_of_static_block.free_names field))
-    in
+    let free_names = free_names_of_fields fields in
     Block_not_rebuilt { free_names }
-  else create_normal_non_code (Block (tag, is_mutable, fields))
+  else create_normal_non_code (SC.block tag is_mutable shape fields)
+
+let create_boxed_float32 are_rebuilding or_var =
+  if ART.do_not_rebuild_terms are_rebuilding
+  then Block_not_rebuilt { free_names = Or_variable.free_names or_var }
+  else create_normal_non_code (SC.boxed_float32 or_var)
 
 let create_boxed_float are_rebuilding or_var =
   if ART.do_not_rebuild_terms are_rebuilding
   then Block_not_rebuilt { free_names = Or_variable.free_names or_var }
-  else create_normal_non_code (Boxed_float or_var)
+  else create_normal_non_code (SC.boxed_float or_var)
 
 let create_boxed_int32 are_rebuilding or_var =
   if ART.do_not_rebuild_terms are_rebuilding
   then Block_not_rebuilt { free_names = Or_variable.free_names or_var }
-  else create_normal_non_code (Boxed_int32 or_var)
+  else create_normal_non_code (SC.boxed_int32 or_var)
 
 let create_boxed_int64 are_rebuilding or_var =
   if ART.do_not_rebuild_terms are_rebuilding
   then Block_not_rebuilt { free_names = Or_variable.free_names or_var }
-  else create_normal_non_code (Boxed_int64 or_var)
+  else create_normal_non_code (SC.boxed_int64 or_var)
 
 let create_boxed_nativeint are_rebuilding or_var =
   if ART.do_not_rebuild_terms are_rebuilding
   then Block_not_rebuilt { free_names = Or_variable.free_names or_var }
-  else create_normal_non_code (Boxed_nativeint or_var)
+  else create_normal_non_code (SC.boxed_nativeint or_var)
+
+let create_boxed_vec128 are_rebuilding or_var =
+  if ART.do_not_rebuild_terms are_rebuilding
+  then Block_not_rebuilt { free_names = Or_variable.free_names or_var }
+  else create_normal_non_code (SC.boxed_vec128 or_var)
 
 let create_immutable_float_block are_rebuilding fields =
   if ART.do_not_rebuild_terms are_rebuilding
@@ -140,9 +154,9 @@ let create_immutable_float_block are_rebuilding fields =
           Name_occurrences.union free_names (Or_variable.free_names field))
     in
     Block_not_rebuilt { free_names }
-  else create_normal_non_code (Immutable_float_block fields)
+  else create_normal_non_code (SC.immutable_float_block fields)
 
-let create_immutable_float_array are_rebuilding fields =
+let create_immutable_naked_number_array builder are_rebuilding fields =
   if ART.do_not_rebuild_terms are_rebuilding
   then
     let free_names =
@@ -151,26 +165,51 @@ let create_immutable_float_array are_rebuilding fields =
           Name_occurrences.union free_names (Or_variable.free_names field))
     in
     Block_not_rebuilt { free_names }
-  else create_normal_non_code (Immutable_float_array fields)
+  else create_normal_non_code (builder fields)
 
-let create_empty_array are_rebuilding =
+let create_immutable_float_array =
+  create_immutable_naked_number_array SC.immutable_float_array
+
+let create_immutable_float32_array =
+  create_immutable_naked_number_array SC.immutable_float32_array
+
+let create_immutable_int32_array =
+  create_immutable_naked_number_array SC.immutable_int32_array
+
+let create_immutable_int64_array =
+  create_immutable_naked_number_array SC.immutable_int64_array
+
+let create_immutable_nativeint_array =
+  create_immutable_naked_number_array SC.immutable_nativeint_array
+
+let create_immutable_vec128_array =
+  create_immutable_naked_number_array SC.immutable_vec128_array
+
+let create_immutable_value_array are_rebuilding fields =
+  if ART.do_not_rebuild_terms are_rebuilding
+  then
+    let free_names = free_names_of_fields fields in
+    Block_not_rebuilt { free_names }
+  else create_normal_non_code (SC.immutable_value_array fields)
+
+let create_empty_array are_rebuilding array_kind =
   if ART.do_not_rebuild_terms are_rebuilding
   then Block_not_rebuilt { free_names = Name_occurrences.empty }
-  else create_normal_non_code Empty_array
+  else create_normal_non_code (SC.empty_array array_kind)
 
 let create_mutable_string are_rebuilding ~initial_value =
   if ART.do_not_rebuild_terms are_rebuilding
   then Block_not_rebuilt { free_names = Name_occurrences.empty }
-  else create_normal_non_code (Mutable_string { initial_value })
+  else create_normal_non_code (SC.mutable_string ~initial_value)
 
 let create_immutable_string are_rebuilding str =
   if ART.do_not_rebuild_terms are_rebuilding
   then Block_not_rebuilt { free_names = Name_occurrences.empty }
-  else create_normal_non_code (Immutable_string str)
+  else create_normal_non_code (SC.immutable_string str)
 
 let map_set_of_closures t ~f =
   match t with
-  | Normal { const; _ } -> begin
+  | Normal { const; _ } -> (
     match const with
     | Code _ | Deleted_code -> t
     | Static_const const -> (
@@ -180,14 +219,17 @@ let map_set_of_closures t ~f =
         Normal
           { const =
               Static_const_or_code.create_static_const
-                (Set_of_closures set_of_closures);
+                (SC.set_of_closures set_of_closures);
             free_names = Set_of_closures.free_names set_of_closures
           }
-      | Block _ | Boxed_float _ | Boxed_int32 _ | Boxed_int64 _
-      | Boxed_nativeint _ | Immutable_float_block _ | Immutable_float_array _
-      | Empty_array | Mutable_string _ | Immutable_string _ ->
-        t)
-  end
+      | Block _ | Boxed_float _ | Boxed_float32 _ | Boxed_int32 _
+      | Boxed_int64 _ | Boxed_vec128 _ | Boxed_nativeint _
+      | Immutable_float_block _ | Immutable_float_array _
+      | Immutable_float32_array _ | Immutable_int32_array _
+      | Immutable_int64_array _ | Immutable_nativeint_array _
+      | Immutable_vec128_array _ | Immutable_value_array _ | Empty_array _
+      | Mutable_string _ | Immutable_string _ ->
+        t))
   | Block_not_rebuilt _ | Set_of_closures_not_rebuilt _ | Code_not_rebuilt _ ->
     t
 
@@ -224,26 +266,15 @@ let deleted_code =
       free_names = Name_occurrences.empty
     }
 
-let make_all_code_deleted t =
-  match t with
-  | Normal { const; _ } -> begin
-    match Static_const_or_code.to_code const with
-    | None -> t
-    | Some _code -> deleted_code
-  end
-  | Block_not_rebuilt _ | Set_of_closures_not_rebuilt _ -> t
-  | Code_not_rebuilt _ -> deleted_code
-
 let make_code_deleted t ~if_code_id_is_member_of =
   match t with
-  | Normal { const; _ } -> begin
+  | Normal { const; _ } -> (
     match Static_const_or_code.to_code const with
     | None -> t
     | Some code ->
       if Code_id.Set.mem (Code.code_id code) if_code_id_is_member_of
       then deleted_code
-      else t
-  end
+      else t)
   | Block_not_rebuilt _ | Set_of_closures_not_rebuilt _ -> t
   | Code_not_rebuilt code ->
     if Code_id.Set.mem
@@ -304,9 +335,12 @@ module Group = struct
     lazy
       (Function_params_and_body.create
          ~return_continuation:(Continuation.create ())
-         ~exn_continuation:(Continuation.create ()) []
-         ~body:(Expr.create_invalid ()) ~free_names_of_body:Unknown
+         ~exn_continuation:(Continuation.create ()) Bound_parameters.empty
+         ~body:(Expr.create_invalid Code_not_rebuilt)
+         ~free_names_of_body:Unknown
          ~my_closure:(Variable.create "my_closure")
+         ~my_region:(Variable.create "my_region")
+         ~my_ghost_region:(Variable.create "my_ghost_region")
          ~my_depth:(Variable.create "my_depth"))
 
   let pieces_of_code_including_those_not_rebuilt t =
@@ -321,19 +355,9 @@ module Group = struct
             Lazy.force function_params_and_body_for_code_not_rebuilt
           in
           Some
-            (Code.create (NCC.code_id code) ~params_and_body
+            (Code.create_with_metadata ~params_and_body
                ~free_names_of_params_and_body:Name_occurrences.empty
-               ~newer_version_of:(NCC.newer_version_of code)
-               ~params_arity:(NCC.params_arity code)
-               ~result_arity:(NCC.result_arity code)
-               ~result_types:(NCC.result_types code) ~stub:(NCC.stub code)
-               ~inline:(NCC.inline code) ~is_a_functor:(NCC.is_a_functor code)
-               ~recursive:(NCC.recursive code)
-               ~cost_metrics:(NCC.cost_metrics code)
-               ~inlining_arguments:(NCC.inlining_arguments code)
-               ~dbg:(NCC.dbg code) ~is_tupled:(NCC.is_tupled code)
-               ~is_my_closure_used:(NCC.is_my_closure_used code)
-               ~inlining_decision:(NCC.inlining_decision code)))
+               ~code_metadata:(NCC.code_metadata code)))
     |> List.map (fun code -> Code.code_id code, code)
     |> Code_id.Map.of_list
 
@@ -348,6 +372,8 @@ module Group = struct
     if not !changed then t else { consts; free_names = Unknown }
 
   let fold_left t ~init ~f = ListLabels.fold_left t.consts ~init ~f
+
+  let add const t = { consts = const :: t.consts; free_names = Unknown }
 
   let concat t1 t2 =
     let free_names : _ Or_unknown.t =

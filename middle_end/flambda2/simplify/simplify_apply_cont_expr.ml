@@ -14,12 +14,11 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 open! Simplify_import
 
-let inline_linearly_used_continuation uacc ~create_apply_cont ~params ~handler
-    ~free_names_of_handler ~cost_metrics_of_handler =
+let inline_linearly_used_continuation uacc ~create_apply_cont ~params:params'
+    ~handler ~free_names_of_handler ~cost_metrics_of_handler =
+  let params = Bound_parameters.to_list params' in
   (* CR-someday mshinwell: With -g, we can end up with continuations that are
      just a sequence of phantom lets then "goto". These would normally be
      treated as aliases, but of course aren't in this scenario, unless the
@@ -37,7 +36,8 @@ let inline_linearly_used_continuation uacc ~create_apply_cont ~params ~handler
       Misc.fatal_errorf
         "Parameter list@ [%a]@ does not match argument list@ [%a]@ when \
          inlining at [Apply_cont]:@ %a@ Handler to inline:@ %a"
-        BP.List.print params Simple.List.print args Apply_cont.print apply_cont
+        Bound_parameters.print params' Simple.List.print args Apply_cont.print
+        apply_cont
         (RE.print (UA.are_rebuilding_terms uacc))
         handler;
     let bindings_outermost_first =
@@ -47,9 +47,8 @@ let inline_linearly_used_continuation uacc ~create_apply_cont ~params ~handler
             |> Bound_pattern.singleton
           in
           let named = Named.create_simple arg in
-          { Simplify_named_result.let_bound;
-            simplified_defining_expr =
-              Simplified_named.reachable named ~try_reify:false;
+          { Expr_builder.let_bound;
+            simplified_defining_expr = Simplified_named.create named;
             original_defining_expr = Some named
           })
     in
@@ -68,6 +67,10 @@ let rebuild_apply_cont apply_cont ~args ~rewrite_id uacc ~after_rebuild =
   let uenv = UA.uenv uacc in
   let cont = AC.continuation apply_cont in
   let rewrite = UE.find_apply_cont_rewrite uenv cont in
+  (* CR gbury: when rewriting aliases, we may lose some information that was in
+     the kinds of the continuation being rewritten (e.g. is the continuation
+     bein rewritten had more kind/sub-kind information on its parameters than
+     its alias). We should think of a way to preserve that information. *)
   let cont = UE.resolve_continuation_aliases uenv cont in
   let create_apply_cont ~apply_cont_to_expr =
     (* The function returned by this code accepts another function, which will
@@ -77,37 +80,36 @@ let rebuild_apply_cont apply_cont ~args ~rewrite_id uacc ~after_rebuild =
        inlined continuation -- before it is wrapped in any [Let]-expressions
        needed as a result of the rewrite. *)
     let rewrite_use_result =
-      let apply_cont = AC.update_continuation_and_args apply_cont cont ~args in
+      let apply_cont = AC.with_continuation_and_args apply_cont cont ~args in
       let apply_cont =
         Simplify_common.clear_demoted_trap_action_and_patch_unused_exn_bucket
           uacc apply_cont
       in
       match rewrite with
-      | None -> EB.no_rewrite apply_cont
-      | Some rewrite ->
-        EB.rewrite_use uacc rewrite ~ctx:Apply_cont rewrite_id apply_cont
+      | None -> EB.no_rewrite_apply_cont apply_cont
+      | Some rewrite -> EB.rewrite_apply_cont uacc rewrite rewrite_id apply_cont
     in
-    match rewrite_use_result with
-    | Apply_cont apply_cont ->
-      let expr, cost_metrics, free_names = apply_cont_to_expr apply_cont in
-      let uacc =
-        UA.add_free_names uacc free_names |> UA.add_cost_metrics cost_metrics
-      in
-      after_rebuild expr uacc
-    | Expr build_expr ->
-      let expr, cost_metrics, free_names = build_expr ~apply_cont_to_expr in
-      let uacc =
-        UA.add_free_names uacc free_names |> UA.add_cost_metrics cost_metrics
-      in
-      after_rebuild expr uacc
+    let expr, cost_metrics, free_names =
+      match rewrite_use_result with
+      | Invalid { message } ->
+        ( RE.create_invalid (Message message),
+          Cost_metrics.zero,
+          Name_occurrences.empty )
+      | Apply_cont apply_cont -> apply_cont_to_expr apply_cont
+      | Expr build_expr -> build_expr ~apply_cont_to_expr
+    in
+    let uacc =
+      UA.add_free_names uacc free_names |> UA.add_cost_metrics cost_metrics
+    in
+    after_rebuild expr uacc
   in
   match UE.find_continuation uenv cont with
   | Linearly_used_and_inlinable
       { params; handler; free_names_of_handler; cost_metrics_of_handler } ->
     (* We must not fail to inline here, since we've already decided that the
-       relevant [Let_cont] is no longer needed. *)
+       relevant [Let_cont] is no longer needed.
 
-    (* When removing continuations don't increment the removed branch counter.
+       When removing continuations don't increment the removed branch counter.
        We can't be sure that removing a continuation maps to removing a branch
        as the decision will be taken later on by the backend. If we were able to
        track the number of times each continuation is used then we would be able
@@ -115,15 +117,17 @@ let rebuild_apply_cont apply_cont ~args ~rewrite_id uacc ~after_rebuild =
        number of continuations) that became linearly used. In any case the
        impact of branches is harder to quantify than the impact of allocating
        (branches can be moved by the backend, their runtime depends on the
-       branch predictor...). Underestimating the number of removed branch is
+       branch predictor...). Underestimating the number of removed branches is
        fine. *)
     inline_linearly_used_continuation uacc ~create_apply_cont ~params ~handler
       ~free_names_of_handler ~cost_metrics_of_handler
-  | Unreachable { arity = _ } ->
+  | Invalid { arity = _ } ->
     (* We allow this transformation even if there is a trap action, on the basis
        that there wouldn't be any opportunity to collect any backtrace, even if
        the [Apply_cont] were compiled as "raise". *)
-    after_rebuild (RE.create_invalid ()) uacc
+    after_rebuild
+      (RE.create_invalid (Apply_cont_of_unreachable_continuation cont))
+      uacc
   | Non_inlinable_zero_arity _ | Non_inlinable_non_zero_arity _
   | Toplevel_or_function_return_or_exn_continuation _ ->
     let apply_cont_to_expr apply_cont =
@@ -137,15 +141,6 @@ let simplify_apply_cont dacc apply_cont ~down_to_up =
   let { S.simples = args; simple_tys = arg_types } =
     S.simplify_simples dacc (AC.args apply_cont)
   in
-  let dacc =
-    let record_args_for_data_flow data_flow =
-      Data_flow.add_apply_cont_args
-        (AC.continuation apply_cont)
-        (List.map Simple.free_names args)
-        data_flow
-    in
-    DA.map_data_flow dacc ~f:record_args_for_data_flow
-  in
   let use_kind =
     Simplify_common.apply_cont_use_kind ~context:Apply_cont_expr apply_cont
   in
@@ -153,6 +148,14 @@ let simplify_apply_cont dacc apply_cont ~down_to_up =
     DA.record_continuation_use dacc
       (AC.continuation apply_cont)
       use_kind ~env_at_use:(DA.denv dacc) ~arg_types
+  in
+  let dacc =
+    let record_args_for_data_flow data_flow =
+      Flow.Acc.add_apply_cont_args
+        (AC.continuation apply_cont)
+        ~rewrite_id args data_flow
+    in
+    DA.map_flow_acc dacc ~f:record_args_for_data_flow
   in
   let dbg = AC.debuginfo apply_cont in
   let dbg = DE.add_inlined_debuginfo (DA.denv dacc) dbg in

@@ -27,37 +27,93 @@
 
 type t
 
+type layout = Label.t Flambda_backend_utils.Doubly_linked_list.t
+
 val create :
   Cfg.t ->
-  layout:Label.t list ->
+  layout:layout ->
   preserve_orig_labels:bool ->
   new_labels:Label.Set.t ->
   t
 
 val cfg : t -> Cfg.t
 
-val layout : t -> Label.t list
+val layout : t -> layout
 
 val preserve_orig_labels : t -> bool
 
 val new_labels : t -> Label.Set.t
 
-val set_layout : t -> Label.t list -> unit
+val set_layout : t -> layout -> unit
+
+(** Add to cfg, layout, and other data-structures that track labels. *)
+val add_block : t -> Cfg.basic_block -> after:Label.t -> unit
+
+val assign_blocks_to_section : t -> Label.t list -> string -> unit
+
+val get_section : t -> Label.t -> string option
 
 (** Remove from cfg, layout, and other data-structures that track labels. *)
 val remove_block : t -> Label.t -> unit
 
+val remove_blocks : t -> Label.Set.t -> unit
+
 val is_trap_handler : t -> Label.t -> bool
 
 val save_as_dot :
-  t ->
   ?show_instr:bool ->
   ?show_exn:bool ->
+  ?annotate_instr:
+    (Format.formatter ->
+    [ `Basic of Cfg.basic Cfg.instruction
+    | `Terminator of Cfg.terminator Cfg.instruction ] ->
+    unit)
+    list ->
   ?annotate_block:(Label.t -> string) ->
+  ?annotate_block_end:(Format.formatter -> Cfg.basic_block -> unit) ->
   ?annotate_succ:(Label.t -> Label.t -> string) ->
+  ?filename:string ->
+  t ->
   string ->
   unit
 
-val print : t -> out_channel -> string -> unit
+val print_dot :
+  ?show_instr:bool ->
+  ?show_exn:bool ->
+  ?annotate_instr:
+    (Format.formatter ->
+    [ `Basic of Cfg.basic Cfg.instruction
+    | `Terminator of Cfg.terminator Cfg.instruction ] ->
+    unit)
+    list ->
+  ?annotate_block:(Label.t -> string) ->
+  ?annotate_block_end:(Format.formatter -> Cfg.basic_block -> unit) ->
+  ?annotate_succ:(Label.t -> Label.t -> string) ->
+  Format.formatter ->
+  t ->
+  unit
 
 val dump : Format.formatter -> t -> msg:string -> unit
+
+(** Change layout: randomly reorder the blocks, keeping the entry block first.
+    This function is intended for testing and enabled by compiler flag
+    "-reorder-blocks-random".
+
+    Side-effects [random_state] by repeated calls to [Random.State.int] and
+    [Random.State.bool]. *)
+val reorder_blocks_random : ?random_state:Random.State.t -> t -> unit
+
+val reorder_blocks : comparator:(Label.t -> Label.t -> int) -> t -> unit
+
+val iter_instructions :
+  t ->
+  instruction:(Cfg.basic Cfg.instruction -> unit) ->
+  terminator:(Cfg.terminator Cfg.instruction -> unit) ->
+  unit
+
+val fold_instructions :
+  t ->
+  instruction:('a -> Cfg.basic Cfg.instruction -> 'a) ->
+  terminator:('a -> Cfg.terminator Cfg.instruction -> 'a) ->
+  init:'a ->
+  'a

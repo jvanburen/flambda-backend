@@ -14,8 +14,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 open! Simplify_import
 
 type do_not_unbox_reason =
@@ -23,6 +21,12 @@ type do_not_unbox_reason =
   | Max_depth_exceeded
   | Incomplete_parameter_type
   | Not_enough_information_at_use
+  | Not_of_kind_value
+  | Unboxing_not_requested
+  (* CR gbury: at one point, we might want to remove this last reason, and
+     instead mark the continuation (whose parameters are being unboxed) as being
+     unreachable. *)
+  | All_fields_invalid
 
 module Extra_param_and_args = struct
   type t =
@@ -50,22 +54,25 @@ end
 type unboxing_decision =
   | Unique_tag_and_size of
       { tag : Tag.t;
+        shape : K.Block_shape.t;
         fields : field_decision list
       }
   | Variant of
       { tag : Extra_param_and_args.t;
         const_ctors : const_ctors_decision;
-        fields_by_tag : field_decision list Tag.Scannable.Map.t
+        fields_by_tag :
+          (K.Block_shape.t * field_decision list) Tag.Scannable.Map.t
       }
   | Closure_single_entry of
-      { closure_id : Closure_id.t;
-        vars_within_closure : field_decision Var_within_closure.Map.t
+      { function_slot : Function_slot.t;
+        vars_within_closure : field_decision Value_slot.Map.t
       }
   | Number of Flambda_kind.Naked_number_kind.t * Extra_param_and_args.t
 
 and field_decision =
   { epa : Extra_param_and_args.t;
-    decision : decision
+    decision : decision;
+    kind : Flambda_kind.With_subkind.t
   }
 
 and const_ctors_decision =
@@ -81,11 +88,12 @@ and decision =
 
 type decisions =
   { decisions : (BP.t * decision) list;
-    rewrite_ids_seen : Apply_cont_rewrite_id.Set.t
+    rewrite_ids_seen : Apply_cont_rewrite_id.Set.t;
+    rewrites_ids_known_as_invalid : Apply_cont_rewrite_id.Set.t
   }
 
 type pass =
-  | Filter of { recursive : bool }
+  | Filter
   | Compute_all_extra_args
 
 (* Printing *)
@@ -97,39 +105,44 @@ let print_do_not_unbox_reason ppf = function
   | Incomplete_parameter_type -> Format.fprintf ppf "incomplete_parameter_type"
   | Not_enough_information_at_use ->
     Format.fprintf ppf "not_enough_information_at_use"
+  | Not_of_kind_value -> Format.fprintf ppf "not_of_kind_value"
+  | Unboxing_not_requested -> Format.fprintf ppf "unboxing_not_requested"
+  | All_fields_invalid -> Format.fprintf ppf "all_fields_invalid"
 
 let rec print_decision ppf = function
   | Do_not_unbox reason ->
     Format.fprintf ppf "@[<hov 1>(do_not_unbox@ %a)@]" print_do_not_unbox_reason
       reason
-  | Unbox (Unique_tag_and_size { tag; fields }) ->
+  | Unbox (Unique_tag_and_size { tag; shape; fields }) ->
     Format.fprintf ppf
-      "@[<v 1>(unique_tag_and_size@ @[<h>(static_tag %a)@]@ @[<hv 2>(fields@ \
-       %a)@])@]"
-      Tag.print tag print_fields_decisions fields
+      "@[<v 1>(unique_tag_and_size@ @[<h>(static_tag %a)@]@ @[<h>(shape %a)@]@ \
+       @[<hv 2>(fields@ %a)@])@]"
+      Tag.print tag K.Block_shape.print shape print_fields_decisions fields
   | Unbox (Variant { tag; const_ctors; fields_by_tag }) ->
     Format.fprintf ppf
       "@[<v 2>(variant@ @[<hov>(tag %a)@]@ @[<hv 2>(const_ctors@ %a)@]@ @[<v \
        2>(fields_by_tag@ %a)@])@]"
       Extra_param_and_args.print tag print_const_ctor_num const_ctors
-      (Tag.Scannable.Map.print print_fields_decisions)
+      (Tag.Scannable.Map.print (fun ppf (_shape, fields) ->
+           print_fields_decisions ppf fields))
       fields_by_tag
-  | Unbox (Closure_single_entry { closure_id; vars_within_closure }) ->
+  | Unbox (Closure_single_entry { function_slot; vars_within_closure }) ->
     Format.fprintf ppf
-      "@[<hov 1>(closure_single_entry@ @[<hov>(closure_id@ %a)@]@ @[<hv \
-       2>(var_within_closures@ %a)@])@]"
-      Closure_id.print closure_id
-      (Var_within_closure.Map.print print_field_decision)
+      "@[<hov 1>(closure_single_entry@ @[<hov>(function_slot@ %a)@]@ @[<hv \
+       2>(value_slots@ %a)@])@]"
+      Function_slot.print function_slot
+      (Value_slot.Map.print print_field_decision)
       vars_within_closure
   | Unbox (Number (kind, epa)) ->
     Format.fprintf ppf
       "@[<hv 1>(number@ @[<h>(kind %a)@]@ @[<hv 1>(var %a)@])@]"
       Flambda_kind.Naked_number_kind.print kind Extra_param_and_args.print epa
 
-and print_field_decision ppf { epa; decision } =
+and print_field_decision ppf { epa; decision; kind } =
   Format.fprintf ppf
-    "@[<hv 1>(@,@[<hov 1>(var %a)@]@ @[<hv 1>(decision@ %a)@])@]"
+    "@[<hv 1>(@,@[<hov 1>(var %a)@]@ @[<hv 1>(decision@ %a)@]@ (kind@ %a))@]"
     Extra_param_and_args.print epa print_decision decision
+    Flambda_kind.With_subkind.print kind
 
 and print_fields_decisions ppf l =
   let pp_sep = Format.pp_print_space in
@@ -142,7 +155,7 @@ and print_const_ctor_num ppf = function
       "@[<hov 1>(const_ctors@ @[<hov 1>(is_int@ %a)@]@ @[<hov 1>(ctor@ %a)@])@]"
       Extra_param_and_args.print is_int print_decision ctor
 
-let [@ocamlformat "disable"] print ppf { decisions; rewrite_ids_seen; } =
+let [@ocamlformat "disable"] print ppf { decisions; rewrite_ids_seen; rewrites_ids_known_as_invalid; } =
   let pp_sep = Format.pp_print_space in
   let aux ppf (param, decision) =
     Format.fprintf ppf "@[<hov 1>(%a@ %a)@]"
@@ -150,15 +163,18 @@ let [@ocamlformat "disable"] print ppf { decisions; rewrite_ids_seen; } =
   in
   Format.fprintf ppf "@[<hov 1>(\
     @[<hov 1>(decisions@ %a)@]@ \
-    @[<hov 1>(rewrite_ids_seen@ %a)@]\
+    @[<hov 1>(rewrite_ids_seen@ %a)@]@ \
+    @[<hov 1>(rewrites_ids_known_as_invalid@ %a)@]\
     )@]"
     (Format.pp_print_list ~pp_sep aux) decisions
     Apply_cont_rewrite_id.Set.print rewrite_ids_seen
+    Apply_cont_rewrite_id.Set.print rewrites_ids_known_as_invalid
 
 module Decisions = struct
   type t = decisions =
     { decisions : (BP.t * decision) list;
-      rewrite_ids_seen : Apply_cont_rewrite_id.Set.t
+      rewrite_ids_seen : Apply_cont_rewrite_id.Set.t;
+      rewrites_ids_known_as_invalid : Apply_cont_rewrite_id.Set.t
     }
 
   let print = print

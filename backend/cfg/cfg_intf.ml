@@ -32,65 +32,23 @@
 module S = struct
   type func_call_operation =
     | Indirect
-    | Direct of { func_symbol : string }
-
-  type tail_call_operation =
-    | Self of { destination : Label.t }
-    | Func of func_call_operation
+    | Direct of Cmm.symbol
 
   type external_call_operation =
     { func_symbol : string;
       alloc : bool;
       ty_res : Cmm.machtype;
-      ty_args : Cmm.exttype list
+      ty_args : Cmm.exttype list;
+      stack_ofs : int
     }
 
   type prim_call_operation =
     | External of external_call_operation
-    | Alloc of
-        { bytes : int;
-          dbginfo : Debuginfo.alloc_dbginfo
-        }
-    | Checkbound of { immediate : int option }
-
-  type operation =
-    | Move
-    | Spill
-    | Reload
-    | Const_int of nativeint (* CR-someday xclerc: change to `Targetint.t` *)
-    | Const_float of int64
-    | Const_symbol of string
-    | Stackoffset of int
-    | Load of Cmm.memory_chunk * Arch.addressing_mode
-    | Store of Cmm.memory_chunk * Arch.addressing_mode * bool
-    | Intop of Mach.integer_operation
-    | Intop_imm of Mach.integer_operation * int
-    | Negf
-    | Absf
-    | Addf
-    | Subf
-    | Mulf
-    | Divf
-    | Compf of Mach.float_comparison (* CR gyorsh: can merge with float_test? *)
-    | Floatofint
-    | Intoffloat
     | Probe of
         { name : string;
-          handler_code_sym : string
+          handler_code_sym : string;
+          enabled_at_init : bool
         }
-    | Probe_is_enabled of { name : string }
-    | Opaque
-    | Specific of Arch.specific_operation
-    | Name_for_debugger of
-        { ident : Ident.t;
-          which_parameter : int option;
-          provenance : unit option;
-          is_assignment : bool
-        }
-
-  type call_operation =
-    | P of prim_call_operation
-    | F of func_call_operation
 
   type bool_test =
     { ifso : Label.t;  (** if test is true goto [ifso] label *)
@@ -115,30 +73,53 @@ module S = struct
       outcomes of comparison include "unordered" (see e.g. x86-64 emitter) when
       the arguments involve NaNs. *)
   type float_test =
-    { lt : Label.t;
+    { width : Cmm.float_width;
+      lt : Label.t;
       eq : Label.t;
       gt : Label.t;
       uo : Label.t  (** if at least one of x or y is NaN *)
     }
 
+  type irc_work_list =
+    | Unknown_list
+    | Coalesced
+    | Constrained
+    | Frozen
+    | Work_list
+    | Active
+
   type 'a instruction =
     { desc : 'a;
-      arg : Reg.t array;
-      res : Reg.t array;
-      dbg : Debuginfo.t;
-      fdo : Fdo_info.t;
-      live : Reg.Set.t;
-      trap_depth : int;
-      id : int
+      mutable arg : Reg.t array;
+      mutable res : Reg.t array;
+      mutable dbg : Debuginfo.t;
+      mutable fdo : Fdo_info.t;
+      mutable live : Reg.Set.t;
+      mutable stack_offset : int;
+      id : int;
+      mutable irc_work_list : irc_work_list;
+      mutable ls_order : int;
+      mutable available_before : Reg_availability_set.t option;
+      mutable available_across : Reg_availability_set.t option
     }
 
+  (* [basic] instruction cannot raise *)
   type basic =
-    | Op of operation
-    | Call of call_operation
+    | Op of Operation.t
     | Reloadretaddr
+        (** This instruction loads the return address from a predefined hidden
+            address (e.g. bottom of the current frame) and stores it in a
+            special hidden register. It can use standard registers for that
+            purpose. They are defined in [Proc.destroyed_at_reloadretaddr]. *)
     | Pushtrap of { lbl_handler : Label.t }
     | Poptrap
     | Prologue
+    | Stack_check of { max_frame_size_bytes : int }
+
+  type 'a with_label_after =
+    { op : 'a;
+      label_after : Label.t
+    }
 
   (* Properties of the representation of successors:
    * - Tests of different types are not mixed. For example, a test that
@@ -162,8 +143,13 @@ module S = struct
     | Switch of Label.t array
     | Return
     | Raise of Lambda.raise_kind
-    | Tailcall of tail_call_operation
+    | Tailcall_self of { destination : Label.t }
+    | Tailcall_func of func_call_operation
     | Call_no_return of external_call_operation
+      (* CR mshinwell: [Call_no_return] should have "external" in the name *)
+    | Call of func_call_operation with_label_after
+    | Prim of prim_call_operation with_label_after
+    | Specific_can_raise of Arch.specific_operation with_label_after
 end
 
 (* CR-someday gyorsh: Switch can be translated to Branch. *)

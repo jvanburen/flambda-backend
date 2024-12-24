@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # To be run from the root of the Flambda backend repo.
 # Cherry pick a commit from upstream repo and apply it to flambda-backend repo.
@@ -108,10 +108,10 @@ apply_patches () {
         echo "Applying $patchfile"
         if [ "$index" -eq 0 ] ; then
             # use the commit details of the first patch
-            git am "$patchfile" "--committer-date-is-author-date"
+            git am -3 "$patchfile" "--committer-date-is-author-date"
         else
             # for subsequent patches, just amend the previous commit
-            git apply "$patchfile" #"--whitespace=fix" ?
+            git apply -3 "$patchfile" #"--whitespace=fix" ?
             git add .
             git commit --amend --no-edit
         fi

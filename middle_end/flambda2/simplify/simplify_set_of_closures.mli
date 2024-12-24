@@ -14,9 +14,14 @@
 (*                                                                        *)
 (**************************************************************************)
 
-(** Simplification of recursive groups of sets of closures. *)
-
-[@@@ocaml.warning "+a-4-30-40-41-42"]
+(** Simplification of recursive groups of sets of closures. This process makes
+    new, simplified versions of [Code] bindings based on the contextual
+    information available from the corresponding set of closures definition.
+    ([Code] bindings are not simplified earlier, except in the special case of
+    stub functions, because much more information is available at the set of
+    closures definitions. Stub functions are simplified once since it is
+    unlikely more information will be gained at the set of closures definitions;
+    this also avoids potential performance problems in pathological cases. *)
 
 open! Simplify_import
 
@@ -26,7 +31,7 @@ val simplify_non_lifted_set_of_closures :
   Downwards_acc.t ->
   Bound_pattern.t ->
   Set_of_closures.t ->
-  simplify_toplevel:Simplify_common.simplify_toplevel ->
+  simplify_function_body:Simplify_common.simplify_function_body ->
   Simplify_named_result.t
 
 (** Simplify a group of possibly-recursive sets of closures, as may occur on the
@@ -34,7 +39,14 @@ val simplify_non_lifted_set_of_closures :
 val simplify_lifted_sets_of_closures :
   Downwards_acc.t ->
   all_sets_of_closures_and_symbols:
-    (Symbol.t Closure_id.Lmap.t * Set_of_closures.t) list ->
-  closure_bound_names_all_sets:Bound_name.t Closure_id.Map.t list ->
-  simplify_toplevel:Simplify_common.simplify_toplevel ->
-  Bound_symbols.t * Rebuilt_static_const.Group.t * Downwards_acc.t
+    (Symbol.t Function_slot.Lmap.t * Set_of_closures.t) list ->
+  closure_bound_names_all_sets:Bound_name.t Function_slot.Map.t list ->
+  simplify_function_body:Simplify_common.simplify_function_body ->
+  Bound_static.t * Rebuilt_static_const.Group.t * Downwards_acc.t
+
+val simplify_stub_function :
+  Downwards_acc.t ->
+  Code.t ->
+  all_code:Code.t Code_id.Map.t ->
+  simplify_function_body:Simplify_common.simplify_function_body ->
+  Rebuilt_static_const.t * Downwards_acc.t

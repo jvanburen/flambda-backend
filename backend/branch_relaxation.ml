@@ -23,7 +23,7 @@ module Make (T : Branch_relaxation_intf.S) = struct
     let rec fill_map pc instr =
       match instr.desc with
       | Lend -> (pc, map)
-      | Llabel lbl -> Hashtbl.add map lbl pc; fill_map pc instr.next
+      | Llabel { label=lbl; _ } -> Hashtbl.add map lbl pc; fill_map pc instr.next
       | op -> fill_map (pc + T.instr_size op) instr.next
     in
     fill_map 0 code
@@ -50,10 +50,9 @@ module Make (T : Branch_relaxation_intf.S) = struct
         T.Cond_branch.max_displacement branch - 12
       in
       match instr.desc with
-      | Lop (Ialloc _)
-      | Lop (Iintop (Icheckbound))
-      | Lop (Iintop_imm (Icheckbound, _))
-      | Lop (Ispecific _) ->
+      | Lop (Alloc _)
+      | Lop (Poll)
+      | Lop (Specific _) ->
         (* We assume that any branches eligible for relaxation generated
            by these instructions only branch forward.  We further assume
            that any of these may branch to an out-of-line code block. *)
@@ -67,6 +66,7 @@ module Make (T : Branch_relaxation_intf.S) = struct
       | _ ->
         Misc.fatal_error "Unsupported instruction for branch relaxation"
 
+
   let fixup_branches ~code_size ~max_out_of_line_code_offset map code =
     let expand_optbranch lbl n arg next =
       match lbl with
@@ -74,6 +74,7 @@ module Make (T : Branch_relaxation_intf.S) = struct
       | Some l ->
         instr_cons (Lcondbranch (Iinttest_imm (Isigned Cmm.Ceq, n), l))
           arg [||] next
+          ~available_before:None ~available_across:None
     in
     let rec fixup did_fix pc instr =
       match instr.desc with
@@ -86,26 +87,21 @@ module Make (T : Branch_relaxation_intf.S) = struct
           fixup did_fix (pc + T.instr_size instr.desc) instr.next
         else
           match instr.desc with
-          | Lop (Ialloc { bytes = num_bytes; dbginfo }) ->
+          | Lop (Poll) ->
+             fixup true (pc + T.instr_size instr.desc) instr.next
+          | Lop (Alloc { bytes = num_bytes; dbginfo }) ->
             instr.desc <- T.relax_allocation ~num_bytes ~dbginfo;
-            fixup true (pc + T.instr_size instr.desc) instr.next
-          | Lop (Iintop (Icheckbound)) ->
-            instr.desc <- T.relax_intop_checkbound ();
-            fixup true (pc + T.instr_size instr.desc) instr.next
-          | Lop (Iintop_imm (Icheckbound, bound)) ->
-            instr.desc
-              <- T.relax_intop_imm_checkbound ~bound;
-            fixup true (pc + T.instr_size instr.desc) instr.next
-          | Lop (Ispecific specific) ->
-            instr.desc <- T.relax_specific_op specific;
             fixup true (pc + T.instr_size instr.desc) instr.next
           | Lcondbranch (test, lbl) ->
             let lbl2 = Cmm.new_label() in
+            let llabel = Llabel { label = lbl2; section_name = None } in
             let cont =
               instr_cons (Lbranch lbl) [||] [||]
-                (instr_cons (Llabel lbl2) [||] [||] instr.next)
+                (instr_cons llabel [||] [||] instr.next
+                  ~available_before:None ~available_across:None)
+                ~available_before:None ~available_across:None
             in
-            instr.desc <- Lcondbranch (invert_test test, lbl2);
+            instr.desc <- Lcondbranch (Simple_operation.invert_test test, lbl2);
             instr.next <- cont;
             fixup true (pc + T.instr_size instr.desc) instr.next
           | Lcondbranch3 (lbl0, lbl1, lbl2) ->

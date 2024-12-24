@@ -14,14 +14,14 @@
 
 (* Insert instrumentation for afl-fuzz *)
 
-open Lambda
 open Cmm
 
 module V = Backend_var
 module VP = Backend_var.With_provenance
 
-let afl_area_ptr dbg = Cconst_symbol ("caml_afl_area_ptr", dbg)
-let afl_prev_loc dbg = Cconst_symbol ("caml_afl_prev_loc", dbg)
+let sym s = { sym_name = s; sym_global = Global }
+let afl_area_ptr dbg = Cconst_symbol (sym "caml_afl_area_ptr", dbg)
+let afl_prev_loc dbg = Cconst_symbol (sym "caml_afl_prev_loc", dbg)
 let afl_map_size = 1 lsl 16
 
 let rec with_afl_logging b dbg =
@@ -42,13 +42,19 @@ let rec with_afl_logging b dbg =
     let afl_area = V.create_local "shared_mem" in
     let op oper args = Cop (oper, args, dbg) in
     Clet(VP.create afl_area,
-      op (Cload (Word_int, Asttypes.Mutable)) [afl_area_ptr dbg],
-      Clet(VP.create cur_pos, op Cxor [op (Cload (Word_int, Asttypes.Mutable))
+         op (Cload ({memory_chunk=Word_int;
+                     mutability=Asttypes.Mutable;
+                     is_atomic=false})) [afl_area_ptr dbg],
+         Clet(VP.create cur_pos, op Cxor [op (Cload {memory_chunk=Word_int;
+                                                     mutability=Asttypes.Mutable;
+                                                     is_atomic=false})
         [afl_prev_loc dbg]; Cconst_int (cur_location, dbg)],
       Csequence(
         op (Cstore(Byte_unsigned, Assignment))
           [op Cadda [Cvar afl_area; Cvar cur_pos];
-            op Cadda [op (Cload (Byte_unsigned, Asttypes.Mutable))
+           op Cadda [op (Cload {memory_chunk=Byte_unsigned;
+                                mutability=Asttypes.Mutable;
+                                is_atomic=false})
                         [op Cadda [Cvar afl_area; Cvar cur_pos]];
                       Cconst_int (1, dbg)]],
         op (Cstore(Word_int, Assignment))
@@ -57,19 +63,19 @@ let rec with_afl_logging b dbg =
 
 and instrument = function
   (* these cases add logging, as they may be targets of conditional branches *)
-  | Cifthenelse (cond, t_dbg, t, f_dbg, f, dbg) ->
+  | Cifthenelse (cond, t_dbg, t, f_dbg, f, dbg, kind) ->
      Cifthenelse (instrument cond, t_dbg, with_afl_logging t t_dbg,
-       f_dbg, with_afl_logging f f_dbg, dbg)
-  | Ctrywith (e, kind, ex, handler, dbg) ->
-     Ctrywith (instrument e, kind, ex, with_afl_logging handler dbg, dbg)
-  | Cswitch (e, cases, handlers, dbg) ->
+       f_dbg, with_afl_logging f f_dbg, dbg, kind)
+  | Ctrywith (e, kind, ex, handler, dbg, value_kind) ->
+     Ctrywith (instrument e, kind, ex, with_afl_logging handler dbg, dbg, value_kind)
+  | Cswitch (e, cases, handlers, dbg, value_kind) ->
      let handlers =
        Array.map (fun (handler, handler_dbg) ->
            let handler = with_afl_logging handler handler_dbg in
            handler, handler_dbg)
          handlers
      in
-     Cswitch (instrument e, cases, handlers, dbg)
+     Cswitch (instrument e, cases, handlers, dbg, value_kind)
 
   (* these cases add no logging, but instrument subexpressions *)
   | Clet (v, e, body) -> Clet (v, instrument e, instrument body)
@@ -81,17 +87,18 @@ and instrument = function
   | Ctuple es -> Ctuple (List.map instrument es)
   | Cop (op, es, dbg) -> Cop (op, List.map instrument es, dbg)
   | Csequence (e1, e2) -> Csequence (instrument e1, instrument e2)
-  | Ccatch (isrec, cases, body) ->
+  | Ccatch (isrec, cases, body, kind) ->
      let cases =
-       List.map (fun (nfail, ids, e, dbg) -> nfail, ids, instrument e, dbg)
+       List.map (fun (nfail, ids, e, dbg, is_cold) ->
+           nfail, ids, instrument e, dbg, is_cold)
          cases
      in
-     Ccatch (isrec, cases, instrument body)
+     Ccatch (isrec, cases, instrument body, kind)
   | Cexit (ex, args, traps) -> Cexit (ex, List.map instrument args, traps)
 
   (* these are base cases and have no logging *)
-  | Cconst_int _ | Cconst_natint _ | Cconst_float _
-  | Cconst_symbol _
+  | Cconst_int _ | Cconst_natint _ | Cconst_float32 _ | Cconst_float _
+  | Cconst_vec128 _ | Cconst_symbol _
   | Cvar _ as c -> c
 
 let instrument_function c dbg =
@@ -101,15 +108,13 @@ let instrument_initialiser c dbg =
   (* Each instrumented module calls caml_setup_afl at
      initialisation, which is a no-op on the second and subsequent
      calls *)
-  with_afl_logging
-    (Csequence
-       (Cop (Cextcall { func = "caml_setup_afl";
-                        builtin = false;
-                        returns = true;
-                        effects = Arbitrary_effects;
-                        coeffects = Has_coeffects;
-                        ty = typ_int; alloc = false; ty_args = []; },
-             [Cconst_int (0, dbg ())],
-             dbg ()),
-        c))
-    (dbg ())
+  Csequence
+    (Cop (Cextcall { func = "caml_setup_afl";
+                     builtin = false;
+                     returns = true;
+                     effects = Arbitrary_effects;
+                     coeffects = Has_coeffects;
+                     ty = typ_int; alloc = false; ty_args = []; },
+          [Cconst_int (0, dbg ())],
+          dbg ()),
+     with_afl_logging c (dbg ()))

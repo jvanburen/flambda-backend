@@ -3,10 +3,9 @@
 (library
  (name flambda2_identifiers)
  (wrapped true)
+ (instrumentation (backend bisect_ppx))
  (flags
   (:standard
-   -principal
-   -nostdlib
    -open
    Flambda2_algorithms
    -open
@@ -16,11 +15,11 @@
    -open
    Flambda2_ui))
  (ocamlopt_flags
-  (:standard -O3))
+  (:standard -O3 -open Int_replace_polymorphic_compare))
  (libraries
-  stdlib
   ocamlcommon
   flambda2_algorithms
   flambda2_kinds
+  flambda2_import
   flambda2_numbers
   flambda2_ui))

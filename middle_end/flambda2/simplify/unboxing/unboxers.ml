@@ -14,21 +14,20 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "+a-30-40-41-42"]
-
 open! Simplify_import
 
 type number_decider =
   { param_name : string;
     kind : K.Naked_number_kind.t;
-    prove_is_a_boxed_number : TE.t -> T.t -> unit T.proof_allowing_kind_mismatch
+    prove_is_a_boxed_number : TE.t -> T.t -> unit T.proof_of_property
   }
 
 type unboxer =
   { var_name : string;
-    invalid_const : Const.t;
+    poison_const : Const.t;
     unboxing_prim : Simple.t -> P.t;
-    prove_simple : TE.t -> min_name_mode:Name_mode.t -> T.t -> Simple.t T.proof
+    prove_simple :
+      TE.t -> min_name_mode:Name_mode.t -> T.t -> Simple.t T.meet_shortcut
   }
 
 module type Number_S = sig
@@ -46,15 +45,31 @@ module Immediate = struct
       prove_is_a_boxed_number = T.prove_is_a_tagged_immediate
     }
 
-  let unboxing_prim simple = P.(Unary (Unbox_number Untagged_immediate, simple))
+  let unboxing_prim simple = P.(Unary (Untag_immediate, simple))
 
   let unboxer =
     { var_name = "naked_immediate";
-      invalid_const =
-        Const.naked_immediate
-          (Targetint_31_63.int (Targetint_31_63.Imm.of_int 0xabcd));
+      poison_const = Const.naked_immediate (Targetint_31_63.of_int 0xabcd);
       unboxing_prim;
-      prove_simple = T.prove_is_always_tagging_of_simple
+      prove_simple = T.meet_tagging_of_simple
+    }
+end
+
+module Float32 = struct
+  let decider =
+    { param_name = "unboxed_float32";
+      kind = K.Naked_number_kind.Naked_float32;
+      prove_is_a_boxed_number = T.prove_is_a_boxed_float32
+    }
+
+  let unboxing_prim simple = P.(Unary (Unbox_number Naked_float32, simple))
+
+  let unboxer =
+    { var_name = "unboxed_float32";
+      poison_const =
+        Const.naked_float32 Numeric_types.Float32_by_bit_pattern.zero;
+      unboxing_prim;
+      prove_simple = T.meet_boxed_float32_containing_simple
     }
 end
 
@@ -69,9 +84,9 @@ module Float = struct
 
   let unboxer =
     { var_name = "unboxed_float";
-      invalid_const = Const.naked_float Numeric_types.Float_by_bit_pattern.zero;
+      poison_const = Const.naked_float Numeric_types.Float_by_bit_pattern.zero;
       unboxing_prim;
-      prove_simple = T.prove_boxed_float_containing_simple
+      prove_simple = T.meet_boxed_float_containing_simple
     }
 end
 
@@ -86,9 +101,9 @@ module Int32 = struct
 
   let unboxer =
     { var_name = "unboxed_int32";
-      invalid_const = Const.naked_int32 Int32.(div 0xabcd0l 2l);
+      poison_const = Const.naked_int32 Int32.(div 0xabcd0l 2l);
       unboxing_prim;
-      prove_simple = T.prove_boxed_int32_containing_simple
+      prove_simple = T.meet_boxed_int32_containing_simple
     }
 end
 
@@ -103,9 +118,9 @@ module Int64 = struct
 
   let unboxer =
     { var_name = "unboxed_int64";
-      invalid_const = Const.naked_int64 Int64.(div 0xdcba0L 2L);
+      poison_const = Const.naked_int64 Int64.(div 0xdcba0L 2L);
       unboxing_prim;
-      prove_simple = T.prove_boxed_int64_containing_simple
+      prove_simple = T.meet_boxed_int64_containing_simple
     }
 end
 
@@ -120,37 +135,60 @@ module Nativeint = struct
 
   let unboxer =
     { var_name = "unboxed_nativeint";
-      invalid_const = Const.naked_nativeint Targetint_32_64.zero;
+      poison_const = Const.naked_nativeint Targetint_32_64.zero;
       unboxing_prim;
-      prove_simple = T.prove_boxed_nativeint_containing_simple
+      prove_simple = T.meet_boxed_nativeint_containing_simple
+    }
+end
+
+module Vec128 = struct
+  let decider =
+    { param_name = "unboxed_vec128";
+      kind = K.Naked_number_kind.Naked_vec128;
+      prove_is_a_boxed_number = prove_is_a_boxed_vec128
+    }
+
+  let unboxing_prim simple = P.(Unary (Unbox_number Naked_vec128, simple))
+
+  let unboxer =
+    { var_name = "unboxed_vec128";
+      poison_const = Const.naked_vec128 Vector_types.Vec128.Bit_pattern.zero;
+      unboxing_prim;
+      prove_simple = T.meet_boxed_vec128_containing_simple
     }
 end
 
 module Field = struct
   let unboxing_prim bak ~block ~index =
-    let field_const = Simple.const (Const.tagged_immediate index) in
-    P.Binary (Block_load (bak, Immutable), block, field_const)
+    P.Unary (Block_load { kind = bak; mut = Immutable; field = index }, block)
 
-  let unboxer ~invalid_const bak ~index =
+  let unboxer ~poison_const bak ~index =
     { var_name = "field_at_use";
-      invalid_const;
+      poison_const;
       unboxing_prim = (fun block -> unboxing_prim bak ~block ~index);
       prove_simple =
         (fun tenv ~min_name_mode t ->
-          T.prove_block_field_simple tenv ~min_name_mode t index)
+          T.meet_block_field_simple tenv ~min_name_mode
+            ~field_kind:(P.Block_access_kind.element_kind_for_load bak)
+            t index)
     }
 end
 
 module Closure_field = struct
-  let unboxing_prim closure_id ~closure var =
-    P.Unary (Project_var { project_from = closure_id; var }, closure)
+  let unboxing_prim function_slot ~closure value_slot =
+    P.Unary
+      (Project_value_slot { project_from = function_slot; value_slot }, closure)
 
-  let unboxer closure_id var =
+  let unboxer function_slot value_slot =
     { var_name = "closure_field_at_use";
-      invalid_const = Const.const_zero;
-      unboxing_prim = (fun closure -> unboxing_prim closure_id ~closure var);
+      poison_const =
+        Const.of_int_of_kind
+          (Flambda_kind.With_subkind.kind (Value_slot.kind value_slot))
+          0;
+      unboxing_prim =
+        (fun closure -> unboxing_prim function_slot ~closure value_slot);
       prove_simple =
         (fun tenv ~min_name_mode t ->
-          T.prove_project_var_simple tenv ~min_name_mode t var)
+          T.meet_project_value_slot_simple tenv ~min_name_mode t value_slot)
     }
 end

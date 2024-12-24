@@ -17,8 +17,6 @@
 (** The signature of "name-like things" that may occur in binding position
     inside [Name_abstraction] constructs. *)
 
-[@@@ocaml.warning "+a-4-30-40-41-42"]
-
 module type S = sig
   type t
 
@@ -28,7 +26,11 @@ module type S = sig
 
   val print : Format.formatter -> t -> unit
 
+  (** Freshen the given name. *)
   val rename : t -> t
 
-  val name_permutation : t -> guaranteed_fresh:t -> Renaming.t
+  (** [renaming stale ~guaranteed_fresh:fresh] is to create a renaming that
+      turns all occurrences of the name [stale] into [fresh] (in a
+      capture-avoiding manner, but that is inherent in [Renaming]). *)
+  val renaming : t -> guaranteed_fresh:t -> Renaming.t
 end
